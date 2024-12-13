@@ -13,8 +13,8 @@ library(tidyverse)
 # 4. Check 'Export survey identifier field and survey timestamp field(s)?', but
 #    no other check boxes.
 
-source("0_data_ingestion.r")
-
+source("0_data_ingestion.R")
+source("1_power_analysis.R")
 
 ###########################
 # Pre-cleaning validation #
@@ -236,6 +236,7 @@ lm_robust(meat_outcome_binary ~ arm, data_clean, se_type='HC0')
 data_clean_h2 = data_clean %>%
   filter(arm %in% c('2 Veg Options', '3 Veg Options'))
 
+H2_Specificity_CI_2(data_clean_h2, 50)
 
 ####################################
 # Exploratory inferential analyses #
