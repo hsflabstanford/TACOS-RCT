@@ -1,10 +1,11 @@
 library(assertthat)
 library(bcaboot)
 library(boot)
+library(dplyr)
+library(estimatr)
 library(fabricatr)
-# library(tidyverse)
-library(DeclareDesign)
 library(table1)
+library(tibble)
 
 #############################
 # Synthetic data generation #
