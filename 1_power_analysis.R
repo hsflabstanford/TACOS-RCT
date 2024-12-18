@@ -27,11 +27,11 @@ generate_synth_data = function(N, arm_0_P, arm_1_P){
   
   arm0 = tibble(
     arm = rep(0, N/2),
-    Chose=draw_categorical(arm_0_P, N=N/2))
+    Chose=fabricatr::draw_categorical(arm_0_P, N=N/2))
   
   arm1 = tibble(
     arm = rep(1, N/2),
-    Chose=draw_categorical(arm_1_P, N=N/2))
+    Chose=fabricatr::draw_categorical(arm_1_P, N=N/2))
   
   d = bind_rows(arm1, arm0) |> mutate(
     ID = 1:N,
