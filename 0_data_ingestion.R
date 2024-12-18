@@ -1,9 +1,5 @@
-#Clear existing data and graphics
-rm(list=ls())
-graphics.off()
-#Load Hmisc library
+# libraries and data
 library(Hmisc)
-#Read Data
 data=read.csv('r formatted data/r2_aug13_TempehTemplate-SelectedDataAug8Prol_DATA_2024-08-13_1139.csv')
 #Setting Labels
 
