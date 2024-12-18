@@ -4,7 +4,6 @@ library(boot)
 library(dplyr)
 library(estimatr)
 library(fabricatr)
-library(table1)
 library(tibble)
 
 #############################
@@ -34,7 +33,7 @@ generate_synth_data = function(N, arm_0_P, arm_1_P){
     arm = rep(1, N/2),
     Chose=draw_categorical(arm_1_P, N=N/2))
   
-  d = bind_rows(arm1, arm0) %>% mutate(
+  d = bind_rows(arm1, arm0) |> mutate(
     ID = 1:N,
     meat_outcome_chicken_binary = as.numeric(Chose == 1),
     meat_outcome_not_chicken_binary = as.numeric(Chose %in% c(2,3,4)))
@@ -170,8 +169,8 @@ bcaplot(bcajack(generate_synth_data(3332, arm_0_P=arm_uniform, arm_1_P=arm_med_s
 # Check data generation is working properly
 generate_synth_data(100000,
                     arm_0_P = arm_uniform,
-                    arm_1_P = arm_med_specific) %>% group_by(arm, Chose) %>%
-  summarise(Count = n(), .groups = 'drop') %>%
-  group_by(arm) %>%
+                    arm_1_P = arm_med_specific) |> group_by(arm, Chose) |>
+  summarise(Count = n(), .groups = 'drop') |>
+  group_by(arm) |>
   mutate(Percentage = Count / sum(Count))
 
