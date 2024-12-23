@@ -1,10 +1,9 @@
 library(assertthat)
 library(bcaboot)
 library(boot)
+library(dplyr, warn.conflicts = FALSE)
+library(estimatr)
 library(fabricatr)
-# library(tidyverse)
-library(DeclareDesign)
-library(table1)
 
 #############################
 # Synthetic data generation #
@@ -33,7 +32,7 @@ generate_synth_data = function(N, arm_0_P, arm_1_P){
       arm = rep(1, N/2),
       Chose=draw_categorical(arm_1_P, N=N/2))
 
-  d = bind_rows(arm1, arm0) %>% mutate(
+  d = bind_rows(arm1, arm0) |> mutate(
     ID = 1:N,
     meat_outcome_chicken_binary = as.numeric(Chose == 1),
     meat_outcome_not_chicken_binary = as.numeric(Chose %in% c(2,3,4)))
@@ -117,10 +116,6 @@ H2_Specificity_CI_1 = function(data, N_bootstraps) {
 
 }
 
-# sims = simulate_H2(N_sims=10, N_participants=3332, N_bootstraps=10,
-#                    boot_function = H2_Specificity_CI_1,
-#                    arm_0_P = arm_uniform,
-#                    arm_1_P = arm_small_specific)
 
 
 ########################################
@@ -153,10 +148,11 @@ H2_Specificity_CI_2 = function(data, N_bootstraps) {
 
 }
 
-sims = simulate_H2(5, 3332, N_bootstraps=1, H2_Specificity_CI_2,
+sims = simulate_H2(5, 3332, N_bootstraps=10, H2_Specificity_CI_2,
                    arm_0_P = arm_uniform,
                    arm_1_P = arm_med_specific)
 
+print(sims)
 # Plot the difference between the BCA CIs and 'standard' CIs across different
 # confidence levels. Note, they are quite close.
 bcaplot(bcajack(generate_synth_data(3332, arm_0_P=arm_uniform, arm_1_P=arm_med_specific),
@@ -169,7 +165,13 @@ bcaplot(bcajack(generate_synth_data(3332, arm_0_P=arm_uniform, arm_1_P=arm_med_s
 # Check data generation is working properly
 generate_synth_data(100000,
                     arm_0_P = arm_uniform,
-                    arm_1_P = arm_med_specific) %>% group_by(arm, Chose) %>%
-  summarise(Count = n(), .groups = 'drop') %>%
-  group_by(arm) %>%
+                    arm_1_P = arm_med_specific) |> group_by(arm, Chose) |>
+  summarise(Count = n(), .groups = 'drop') |>
+  group_by(arm) |>
   mutate(Percentage = Count / sum(Count))
+
+# error here 
+# sims = simulate_H2(N_sims=10, N_participants=3332, N_bootstraps=10,
+#                    boot_function = H2_Specificity_CI_1,
+#                    arm_0_P = arm_uniform,
+#                    arm_1_P = arm_small_specific)
