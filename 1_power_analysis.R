@@ -155,8 +155,10 @@ sims = simulate_H2(5, 3332, N_bootstraps=10, H2_Specificity_CI_2,
 print(sims)
 # Plot the difference between the BCA CIs and 'standard' CIs across different
 # confidence levels. Note, they are quite close.
-bcaplot(bcajack(generate_synth_data(3332, arm_0_P=arm_uniform, arm_1_P=arm_med_specific),
-        500, calculate_statistics_2))
+bcaplot(bcajack(generate_synth_data(3332, 
+                                    arm_0_P = arm_uniform, 
+                                    arm_1_P = arm_med_specific),
+                500, calculate_statistics_2))
 
 
 #########
@@ -175,3 +177,6 @@ generate_synth_data(100000,
 #                    boot_function = H2_Specificity_CI_1,
 #                    arm_0_P = arm_uniform,
 #                    arm_1_P = arm_small_specific)
+
+
+
