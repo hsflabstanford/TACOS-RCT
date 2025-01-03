@@ -14,28 +14,28 @@ set.seed(65086934)
 # We'll treat this outcome as having only 5 categories combining all plant-based
 # dishes as well as opt-outs in each arm as a single category.
 arm_uniform =          c(.20, .2, .2, .2, .2)
-arm_small_specific =   c(.17, .2, .2, .2, .23)
-arm_med_specific =     c(.15, .2, .2, .2, .25)
-arm_large_specific =   c(.08, .2, .2, .2, .32)
-arm_med_non_specific = c(.175, .175, .175, .175, .3)
+arm_small_specific =   c(.17, .2, .2, .2, .23) # +3% ATE entirely from chicken
+arm_med_specific =     c(.15, .2, .2, .2, .25) # +5% ATE, entirely from chicken
+arm_large_specific =   c(.08, .2, .2, .2, .32) # +12% ATE, entirely from chicken
+arm_med_non_specific = c(.175, .175, .175, .175, .3) # + 10% ATE, from all categories
 
 # Function to simulate the experiment. arm_0_P take a length-5 probability
-# vector representing the distribution of selections in the control arm. arm_1_P
-# is the same as arm_0_P but for the treatment arm
+# vector representing the distribution of selections in the control arm. 
+# arm_1_P is the same as arm_0_P but for the treatment arm
 generate_synth_data = function(N, arm_0_P, arm_1_P){
 
   arm0 = tibble(
     arm = rep(0, N/2),
-    Chose=draw_categorical(arm_0_P, N=N/2))
+    Chose=fabricatr::draw_categorical(arm_0_P, N = N/2))
 
   arm1 = tibble(
       arm = rep(1, N/2),
-      Chose=draw_categorical(arm_1_P, N=N/2))
+      Chose=fabricatr::draw_categorical(arm_1_P, N = N/2))
 
   d = bind_rows(arm1, arm0) |> mutate(
     ID = 1:N,
     meat_outcome_chicken_binary = as.numeric(Chose == 1),
-    meat_outcome_not_chicken_binary = as.numeric(Chose %in% c(2,3,4)))
+    meat_outcome_not_chicken_binary = as.numeric(Chose %in% c(2, 3, 4)))
 
   return(d)
 }
@@ -87,26 +87,26 @@ H2_Specificity_CI_1 = function(data, N_bootstraps) {
     data = data[bootstrap_sample_index,]
 
     Chicken_model = lm_robust(meat_outcome_chicken_binary ~ arm, data,
-                              se_type='HC0')
+                              se_type = 'HC0')
     Meat_model = lm_robust(meat_outcome_not_chicken_binary ~ arm, data,
-                           se_type='HC0')
+                           se_type = 'HC0')
 
-    return(c(Chicken_mean=Chicken_model$coefficients['arm'],
-             Chicken_var=Chicken_model$vcov['arm','arm'],
+    return(c(Chicken_mean = Chicken_model$coefficients['arm'],
+             Chicken_var = Chicken_model$vcov['arm','arm'],
 
-             Meat_mean=Meat_model$coefficients['arm'],
-             Meat_var=Meat_model$vcov['arm','arm'],
+             Meat_mean = Meat_model$coefficients['arm'],
+             Meat_var = Meat_model$vcov['arm','arm'],
 
-             Chicken_minus_Meat=Chicken_model$coefficients['arm'] -
+             Chicken_minus_Meat = Chicken_model$coefficients['arm'] -
                Meat_model$coefficients['arm'])
            )
   }
 
-  bs = boot(data, calculate_statistics_1, R=N_bootstraps, parallel='multicore')
+  bs = boot::boot(data, calculate_statistics_1, R=N_bootstraps, parallel='multicore')
 
   # Index is getting the point estimate (5) and standard error (2) via
   # `calculate_statistics`
-  bs_ci = boot.ci(bs, type="bca", index=c(5,2))
+  bs_ci = boot::boot.ci(bs, type="bca", index=c(5,2))
 
   return(c(
     # Get upper and lower bounds for a 95% CI
@@ -123,8 +123,8 @@ H2_Specificity_CI_1 = function(data, N_bootstraps) {
 ########################################
 # Helper function that generates the point estimate of the intervention effect
 calculate_statistics_2 = function(data) {
-  Chicken_model = lm_robust(meat_outcome_chicken_binary ~ arm, data, se_type='HC0')
-  Meat_model = lm_robust(meat_outcome_not_chicken_binary ~ arm, data, se_type='HC0')
+  Chicken_model = estimatr::lm_robust(meat_outcome_chicken_binary ~ arm, data, se_type='HC0')
+  Meat_model = estimatr::lm_robust(meat_outcome_not_chicken_binary ~ arm, data, se_type='HC0')
 
   # Interpretation: How many percentage points larger was the reduction in
   # chicken selection than for other meats.
@@ -133,10 +133,10 @@ calculate_statistics_2 = function(data) {
 
 
 # This works, but the BCA implementation is significantly slower than `boot`,
-# presumably because the later allows multicore parallelization
+# presumably because `boot` allows multicore parallelization
 H2_Specificity_CI_2 = function(data, N_bootstraps) {
 
-  bca_ci = bcajack(data, N_bootstraps, calculate_statistics_2)
+  bca_ci = bcaboot::bcajack(data, N_bootstraps, calculate_statistics_2)
 
   return(c(
     # Get the mean of the bootstrap estimates
@@ -168,7 +168,7 @@ generate_synth_data(100000,
                     arm_1_P = arm_med_specific) |> group_by(arm, Chose) |>
   summarise(Count = n(), .groups = 'drop') |>
   group_by(arm) |>
-  mutate(Percentage = Count / sum(Count))
+  mutate(Percentage = Count / sum(Count))x
 
 # error here 
 # sims = simulate_H2(N_sims=10, N_participants=3332, N_bootstraps=10,
