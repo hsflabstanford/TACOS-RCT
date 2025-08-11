@@ -1,0 +1,1740 @@
+---
+title: "TACOS-pre-registered-hypotheses"
+author: "Jessica Hope, Seth Ariel Green, Jacob Peacock, and Maya Mathur"
+date: "`r Sys.Date()`"
+output: word_document
+editor_options: 
+  chunk_output_type: console
+---
+
+### setup
+
+```{r libraries_data_options_functions}
+# libraries
+options(width = 120)
+library(bcaboot)
+library(broom)
+library(dplyr, warn.conflicts = F)
+library(estimatr)
+library(EValue)
+library(forcats)
+library(ggplot2)
+library(grf)
+library(kableExtra, warn.conflicts = F)
+library(knitr)
+library(recipes, warn.conflicts = F)  # For preprocessing
+library(stringr)
+library(tidyr)
+library(tidyselect)
+source('./functions/analysis-functions.R')
+source('./functions/format-functions.R')
+source('./functions/M-value-functions.R')
+# FFQ mapping for dietary frequency conversions
+ffq_mapping <- c(
+    "Never" = 0,
+    "1 time in the past week" = 1,
+    "2 times in the past week" = 2,
+    "3-4 times in the past week" = 3.5,
+    "5-6 times in the past week" = 5.5,
+    "1 time per day" = 7,
+    "2 or more times per day" = 14
+  )
+  # function for FFQ conversions
+ffq_code_to_text <- function(code) {
+    case_when(
+      code == 1 ~ "Never",
+      code == 2 ~ "1 time in the past week",
+      code == 3 ~ "2 times in the past week",
+      code == 4 ~ "3-4 times in the past week",
+      code == 5 ~ "5-6 times in the past week",
+      code == 6 ~ "1 time per day",
+      code == 7 ~ "2 or more times per day",
+      TRUE ~ NA_character_
+    )
+  }
+
+dat <- read.csv('./data/cleaned-tacos-data.csv') |> 
+  # create vars that R expects for regression and/or turn things into sensible regressors 
+  # (e.g. turn age into a count of decades)
+  mutate(
+    # Core treatment variables
+    treatment_arm = as.factor(treatment_arm),
+    PMA_count = as.numeric(as.character(treatment_arm)) - 1,
+    combined_arms = ifelse(treatment_arm %in% c("2", "3"), 1, 0),
+    
+    # Core outcome variables  
+    chicken_select = as.numeric(taco_choice == "Chicken"),
+    other_meat_select = as.numeric(taco_choice %in% c("Beef barbacoa", "Carnitas", "Steak")),
+    
+    # Basic control variables
+    gender = relevel(factor(gender), ref = "Male"),
+    age = age / 10,
+    # Data cleaning
+    taco_choice = str_replace_all(taco_choice, "plant-based protein", "PMA") |>
+      str_replace_all("Veggies", "Veggie"),
+    opted_out_all = if_else(is.na(opted_out_all), "participant selected a taco",
+                            opted_out_all)) |> 
+  mutate(
+    passed_first_attention_check = case_when(
+      is.na(merged_protein) | is.na(attention_check) ~ NA,
+      merged_protein == attention_check ~ TRUE,
+      TRUE ~ FALSE
+    ),
+    passed_second_attention_check = case_when(
+      is.na(ffq_attn_freq) ~ NA,
+      ffq_attn_freq == 7 ~ TRUE,
+      TRUE ~ FALSE)) |>
+  select(-c(X))
+
+  # State FIPS lookup for county data processing
+  state_fips_lookup <- data.frame(
+    state_fips = c("01", "02", "04", "05", "06", "08", "09", "10", "11", "12", "13", "15",
+                   "16", "17", "18", "19", "20", "21", "22", "23", "24", "25", "26", "27",
+                   "28", "29", "30", "31", "32", "33", "34", "35", "36", "37", "38", "39",
+                   "40", "41", "42", "44", "45", "46", "47", "48", "49", "50", "51", "53",
+                   "54", "55", "56", "60", "66", "69", "72", "78"),
+    state_clean = c("AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "DC", "FL", "GA", "HI",
+                    "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD", "MA", "MI", "MN",
+                    "MS", "MO", "MT", "NE", "NV", "NH", "NJ", "NM", "NY", "NC", "ND", "OH",
+                    "OK", "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA",
+                    "WV", "WI", "WY", "AS", "GU", "MP", "PR", "VI"))
+  
+  # Process income data
+  income_dat <- read.csv('./data/income-data.csv') |>
+    mutate(GEOID = as.character(GEOID)) |>
+    mutate(
+      # Format GEOID to ensure it's 5 digits with leading zeros
+      GEOID_fixed = sprintf("%05d", as.numeric(GEOID)),
+      # Extract state FIPS (first 2 digits)
+      state_fips = substr(GEOID_fixed, 1, 2),
+      # Extract county name from NAME
+      county_part = gsub(",.*$", "", NAME),
+      # Clean county name by removing designations
+      county_name_clean = gsub(" County$| Parish$| Municipio$| Borough$| Census Area$| City and Borough$| Municipality$", "", county_part),
+      county_name_clean = trimws(county_name_clean)) |>
+    # Join with state lookup
+    left_join(state_fips_lookup, by = "state_fips") |>
+    # Create location field to match your other dataset
+    mutate(location = paste0(county_name_clean, ", ", state_clean)) |>
+    # Special case handling for all the problem locations
+    mutate(location = case_when(
+      # Baltimore special case
+      NAME == "Baltimore County, Maryland" ~ "Baltimore, MD",
+      NAME == "Baltimore city, Maryland" ~ "Baltimore city, MD",
+      
+      # Virginia independent cities
+      NAME == "Alexandria city, Virginia" ~ "Alexandria, VA",
+      NAME == "Bristol city, Virginia" ~ "Bristol, VA",
+      NAME == "Charlottesville city, Virginia" ~ "Charlottesville, VA",
+      NAME == "Hampton city, Virginia" ~ "Hampton, VA",
+      NAME == "Hopewell city, Virginia" ~ "Hopewell, VA",
+      NAME == "Newport News city, Virginia" ~ "Newport News, VA",
+      NAME == "Petersburg city, Virginia" ~ "Petersburg, VA",
+      NAME == "Portsmouth city, Virginia" ~ "Portsmouth, VA",
+      NAME == "Radford city, Virginia" ~ "Radford, VA",
+      NAME == "Suffolk city, Virginia" ~ "Suffolk, VA",
+      NAME == "Winchester city, Virginia" ~ "Winchester, VA",
+      
+      # Other special cases
+      NAME == "Delaware County, Ohio" ~ "Delaware County, OH",
+      NAME == "Doña Ana County, New Mexico" ~ "Dona Ana, NM",
+      
+      # Default case - keep original location
+      TRUE ~ location
+    )) |>
+    # Add Virgin Islands data
+    bind_rows(
+      tibble(
+        GEOID = "78020",
+        GEOID_fixed = "78020",
+        NAME = "St. John, Virgin Islands",
+        variable = "B19013_001",
+        estimate = 40408,
+        moe = NA_real_,
+        county_part = "St. John",
+        county_name_clean = "St. John",
+        state_fips = "78",
+        state_clean = "VI",
+        location = "St. John, VI")) |>
+    # Add St. Thomas, VI data
+    bind_rows(
+      tibble(
+        GEOID = "78030",
+        GEOID_fixed = "78030",
+        NAME = "St. Thomas, Virgin Islands",
+        variable = "B19013_001",
+        estimate = 38232, # Using an approximate value, replace with actual if available
+        moe = NA_real_,
+        county_part = "St. Thomas",
+        county_name_clean = "St. Thomas",
+        state_fips = "78",
+        state_clean = "VI",
+        location = "St. Thomas, VI"))
+  
+  # Process election data
+  election_data <- read.csv("./data/election_data.csv") |>
+    mutate(
+      # Create state abbreviations 
+      state_abbr = state.abb[match(state_name, state.name)],
+      # Initial location field without any cleaning
+      temp_location = paste0(county_name, ", ", state_abbr)) |>
+    # Create the final location field that will match your combined dataset
+    mutate(location = case_when(
+      # First handle special cases explicitly
+      county_name == "Baltimore County" & state_name == "Maryland" ~ "Baltimore, MD",
+      county_name == "Baltimore city" & state_name == "Maryland" ~ "Baltimore city, MD",
+      county_name == "Fairfax County" & state_name == "Virginia" ~ "Fairfax, VA",
+      county_name == "Fairfax city" & state_name == "Virginia" ~ "Fairfax city, VA",
+      # Then handle regular counties by removing suffixes
+      grepl(" County$", county_name) ~ paste0(gsub(" County$", "", county_name), ", ", state_abbr),
+      grepl(" Parish$", county_name) ~ paste0(gsub(" Parish$", "", county_name), ", ", state_abbr),
+      grepl(" Borough$", county_name) ~ paste0(gsub(" Borough$", "", county_name), ", ", state_abbr),
+      grepl(" Census Area$", county_name) ~ paste0(gsub(" Census Area$", "", county_name), ", ", state_abbr),
+      grepl(" Municipality$", county_name) ~ paste0(gsub(" Municipality$", "", county_name), ", ", state_abbr),
+      grepl(" Municipio$", county_name) ~ paste0(gsub(" Municipio$", "", county_name), ", ", state_abbr),
+      # Keep independent cities as is - they often should retain "city"
+      grepl(" city$", county_name) ~ paste0(county_name, ", ", state_abbr),
+      # Default case
+      TRUE ~ temp_location))
+  
+  # Now process the main data with all derived variables and merges
+  dat <- dat |>
+    # Join income data
+    left_join(income_dat, by = "location") |>
+    rename(median_income = estimate) |>
+    mutate(income_10k = median_income / 10000) |>
+    # Join election data
+    left_join(election_data |>  
+                select(location, votes_gop, votes_dem, total_votes, per_gop, per_dem), 
+              by = "location") |>
+    mutate(
+      # Dietary frequency variables
+      cow_numeric = ffq_mapping[ffq_cow_freq],
+      pig_numeric = ffq_mapping[ffq_pig_freq],
+      hen_numeric = ffq_mapping[ffq_hen_freq],
+      fish_numeric = ffq_mapping[ffq_fish_freq],
+      eggs_numeric = ffq_mapping[ffq_eggs_freq],
+      dairy_numeric = ffq_mapping[ffq_dairy_freq],
+      
+      # Calculate total weekly meat consumption
+      total_meat = cow_numeric + pig_numeric + hen_numeric + fish_numeric,
+      
+      # Create dietary category
+      diet_category_ffq = case_when(
+        # Vegan: never consumes any animal products
+        ffq_cow_freq == "Never" & ffq_pig_freq == "Never" & 
+          ffq_hen_freq == "Never" & ffq_fish_freq == "Never" &
+          ffq_eggs_freq == "Never" & ffq_dairy_freq == "Never" ~ "Vegan",
+        
+        # Vegetarian: never consumes meat but may consume eggs/dairy
+        ffq_cow_freq == "Never" & ffq_pig_freq == "Never" & 
+          ffq_hen_freq == "Never" & ffq_fish_freq == "Never" ~ "Vegetarian",
+        
+        # Pescatarian: never consumes land animals but eats fish
+        ffq_cow_freq == "Never" & ffq_pig_freq == "Never" & 
+          ffq_hen_freq == "Never" & ffq_fish_freq != "Never" ~ "Pescatarian",
+        
+        # Other categories based on total meat consumption
+        total_meat <= 2 ~ "Low meat",
+        total_meat <= 6 ~ "Moderate meat",
+        total_meat <= 13 ~ "Regular meat",
+        TRUE ~ "High meat"
+      ),
+      
+      # Make sure category is a factor with specified order
+      diet_category_ffq = factor(diet_category_ffq, levels = c(
+        "Vegan", "Vegetarian", "Pescatarian", 
+        "Low meat", "Moderate meat", "Regular meat", "High meat")),
+      
+      # Ethnicity variables
+      ethnicity_combined = case_when(
+        # Create AAPI group (Asian American and Pacific Islander)
+        ethnicity %in% c("East Asian", "South Asian", "Southeast Asian", 
+                         "Pacific Islander") ~ "AAPI",
+        
+        # Combine all Multi-ethnic categories
+        grepl("^Multi", ethnicity) ~ "Multi-ethnic",
+        
+        # Keep major categories as is
+        ethnicity %in% c("Black/African American", "Caucasian", "Hispanic") ~
+          as.character(ethnicity),
+        
+        # Combine remaining small categories
+        TRUE ~ "Other"
+      ),
+      ethnicity_combined = relevel(factor(ethnicity_combined), ref = "Caucasian"),
+      
+      # Education variables
+      education_combined = case_when(
+        education %in% c("8th grade or less", "Some high school, but did not graduate") 
+        ~ "Less than high school",
+        TRUE ~ as.character(education)
+      ),
+      education_combined = factor(
+        education_combined,
+        levels = c(
+          "Less than high school",
+          "High school or GED",
+          "Some college or 2-year degree",
+          "4-year college graduate",
+          "More than 4-year college degree"
+        )
+      ),
+      education_linear = case_when(
+        education == "8th grade or less" ~ 8,
+        education == "Some high school, but did not graduate" ~ 10,
+        education == "High school or GED" ~ 12,
+        education == "Some college or 2-year degree" ~ 14,
+        education == "4-year college graduate" ~ 16,
+        education == "More than 4-year college degree" ~ 18,
+        TRUE ~ NA_real_
+      ),
+      
+      
+      # FFQ frequency text conversion (if ffq_code_to_text function exists)
+      across(starts_with("ffq_") & ends_with("_freq"), ~ffq_code_to_text(.)),
+      
+      # Vegan check
+      is_vegan = case_when(
+        (merged_protein %in% c(5, 6, 7) & has_dairy == FALSE) ~ 1,
+        TRUE ~ 0
+      ),
+      
+      # Plant-based frequency numeric
+      ffq_pb_freq_numeric = case_when(
+        ffq_pb_freq == "Never" ~ 0,
+        ffq_pb_freq == "1 time in the past week" ~ 1,
+        ffq_pb_freq == "2 times in the past week" ~ 2,
+        ffq_pb_freq == "3-4 times in the past week" ~ 3.5,
+        ffq_pb_freq == "5-6 times in the past week" ~ 5.5,
+        ffq_pb_freq == "1 time per day" ~ 7,
+        ffq_pb_freq == "2 or more times per day" ~ 14,
+        TRUE ~ NA_real_
+      )
+    ) |>
+    mutate(block_order_simplified = case_when(
+      str_detect(block_order, "q_pen.*q_tacos.*shirt") ~ "pen_tacos_shirt",
+      str_detect(block_order, "q_pen.*shirt.*q_tacos") ~ "pen_shirt_tacos",
+      str_detect(block_order, "q_tacos.*q_pen.*shirt") ~ "tacos_pen_shirt", 
+      str_detect(block_order, "q_tacos.*shirt.*q_pen") ~ "tacos_shirt_pen",
+      str_detect(block_order, "shirt.*q_pen.*q_tacos") ~ "shirt_pen_tacos",
+      str_detect(block_order, "shirt.*q_tacos.*q_pen") ~ "shirt_tacos_pen",
+      TRUE ~ "other"),
+  block_order_simplified = factor(block_order_simplified)) 
+  
+# main results for h1
+  h1_results <- dat |> run_h1_analyses()
+
+```
+# Primary hypotheses
+## H1 Effectiveness
+
+> We hypothesize that adding more plant-based options will lead to more plant-based choices.
+
+### H1a: The proportion of consumers selecting any animal-based meat will decrease from Arm 1 to Arm 2. 
+
+```{r h1a}
+h1_results$h1a |> kable()
+```
+
+### H1b: The proportion of consumers selecting any animal-based meat will decrease from Arm 1 to Arm 3.
+
+```{r h1b}
+h1_results$h1b |> kable()
+```
+
+Hypotheses 1a and 1b are directionally supported, but neither effect size is statistically significant, even before applying a Bonferroni correction. Further, the small lower bound confidence intervals -- `r -round(h1_results$h1a$conf.low[2],3)` pp reductions for h1a and `r round(h1_results$h1b$conf.low[2],3)` pp reductions for the h2b -- rule out effects at the level of 5 pp reductions in meat consumption, which we pre-specified was our minimum effect size of interest.
+
+### H1c: The proportion of consumers selecting any animal-based meat will decline on average with each PMA addition to the menu. 
+```{r H1c}
+h1_results$h1c |> kable()
+# what effect does it have on veggie and guac choice? 
+dat |> mutate(trad_veg_or_not = if_else(
+  taco_choice == "Veggie (includes guacamole)", 1, 0)) |>
+  h1_analysis(trad_veg_or_not ~ PMA_count) 
+
+```
+
+Again, the result here is not significant and its confidence intervals do not overlap with our minimum effect of interest. 
+
+### H1d: The proportion of customers selecting any animal-based meat will be lower in Arms 2 and 3 combined than in Arm 1.
+
+```{r h1d}
+h1_results$h1d |> kable()
+```
+
+Again, the results are directionally correct, but not significant and the small confidence intervals rule out our minimum effect size of interest.
+
+## Visualization
+Here is a plot showing the proportion of people who select different taco fillings in different treatment arms.
+
+```{r visualization}
+# Create the taco choice visualization
+taco_choice_figure <- dat |>
+  # Prepare the factor levels
+  mutate(taco_choice = fct_relevel(taco_choice, 
+                                  "I would not order any of these fillings.",
+                                  "Veggie (includes guacamole)",
+                                  "Sofritas (PMA)",
+                                  "Chick'nitas (PMA)",
+                                  "Beef barbacoa", 
+                                  "Carnitas",
+                                  "Steak", 
+                                  "Chicken")) |>
+  # Create the plot
+  ggplot(aes(x = treatment_arm, fill = taco_choice)) +
+  geom_bar(position = "fill", width = 0.6) +  # Narrower bars
+  scale_y_continuous(labels = scales::percent) +
+  scale_x_discrete(labels = c("No PMAs", "Sofritas \n only", "Sofritas \n & Chick'nitas")) +
+  scale_fill_manual(values = c(
+    "I would not order any of these fillings." = "gray80",
+    "Veggie (includes guacamole)" = "#4CAF50",
+    "Sofritas (PMA)" = "orange",
+    "Chick'nitas (PMA)" = "blue",
+    "Chicken" = "#FFECB3",
+    "Beef barbacoa" = "#FDD835",
+    "Carnitas" = "#A1887F",
+    "Steak" = "darkred"
+  )) +
+  labs(
+    x = "Treatment Arm",
+    y = "Proportion",
+    fill = "Taco Choice"
+  ) + 
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    axis.text = element_text(size = 24),        # Larger axis tick labels
+    axis.title = element_text(size = 28),       # Larger axis titles
+    legend.text = element_text(size = 18),      # Larger legend text
+    legend.title = element_text(size = 24),     # Larger legend title
+    legend.position = "right"                   # Try "bottom" if you prefer
+  ) 
+# taco_choice_figure
+ggsave(filename = './results/taco-figure.png', 
+       height = 8, width = 6, units = 'in', 
+       plot = taco_choice_figure, bg = '#ffffff', dpi = 300)
+```
+
+Here's the same information as a table:
+
+```{r summary_table_of_taco_choice}
+dat |>
+  group_by(treatment_arm) |>
+  count(taco_choice) |>
+  mutate(proportion = n/sum(n)) |>
+  select(treatment_arm, taco_choice, proportion) |>
+  pivot_wider(
+    names_from = treatment_arm,
+    values_from = proportion)
+```
+
+## H2 Specificity
+
+> Adding “Chick’nitas” will be most effective at reducing demand for chicken rather than meat generally. We expect declines in all categories, but concentrated in the chicken category.
+
+Formally, we suggest the following inequalities will hold:
+
+### H2a: P(Chicken | Arm=2) > P(Chicken | Arm=3)
+
+### H2b: P(Chicken | Arm=2) - P(Chicken | Arm=3) > P(Other meat | Arm=2) - P(Other meat | Arm=3)
+
+```{r H2a_h2b, message=FALSE, warning=FALSE, results='hide'}
+h2_results <- dat |>
+  # Prepare data for Arms 2 and 3
+  filter(treatment_arm %in% c("2", "3")) |>
+  mutate(
+    # Binary indicator for choosing chicken
+    chicken_select = as.numeric(taco_choice == "Chicken"),
+    # Binary indicator for choosing other meat
+    other_meat_select = as.numeric(taco_choice %in% c("Beef barbacoa", "Carnitas", "Steak")),
+    # Create binary arm indicator (0 for Arm 2, 1 for Arm 3)
+    arm = as.numeric(treatment_arm == "3")  # Arm 3 = 1, Arm 2 = 0
+  ) |> 
+  test_h2_hypotheses()
+```
+
+Our model results (BCA, chicken, and other meats):
+```{r bca_results}
+h2_results$bca_result
+
+h2_results$chicken_model
+
+h2_results$other_meat_model
+```
+
+Our core results for H2:
+```{r show_h2}
+h2_results$core_results |> as_tibble() |> kable()
+
+# intuitive way to understand h2a: table w/ each part of the diff-in-diff
+dat |>
+  group_by(treatment_arm) |>
+  summarise(n = n(),
+            chicken_rate = mean(taco_choice == "Chicken", na.rm = TRUE),
+            other_meat_rate = mean(taco_choice %in% 
+                                     c("Beef barbacoa", "Carnitas", "Steak"), 
+                                   na.rm = TRUE)) |>
+  mutate(
+    treatment_arm_label = case_when(
+    treatment_arm == 1 ~ "Arm 1 (No PMAs)",
+    treatment_arm == 2 ~ "Arm 2 (Sofritas only)", 
+    treatment_arm == 3 ~ "Arm 3 (Sofritas + Chick'nitas)",
+    TRUE ~ paste("Arm", treatment_arm))) |> 
+  select(treatment_arm_label, n, chicken_rate, other_meat_rate)
+```
+
+H2a is marginally validated: `r -round(h2_results$H2a_effect * 100, 3)`% fewer people choose chicken in treatment 2 than in treatment 1, and there is no corresponding decline in other meat choices. (There is actually an increase in other meat consumption of about `r round(h2_results$other_meat_model$coefficients[2] * 100, 3)` percentage points.)
+
+H2b is not supported. Although the probability of choosing chicken in arm 2 minus the probability of choosing chicken in arm 3 is greater than the difference between the probability of choosing other mean in arm 2 and the probability of choosing other meat in arm 3, the confidence intervals do not exclude a null effect. 
+
+```{r intuitive_h2_treatment, message=F,echo=F}
+# intuitive way to understand h2a: table w/ each part of the diff-in-diff
+dat |>
+  group_by(treatment_arm) |>
+  summarise(n = n(),
+            chicken_rate = mean(taco_choice == "Chicken", na.rm = TRUE),
+            other_meat_rate = mean(taco_choice %in% 
+                                     c("Beef barbacoa", "Carnitas", "Steak"), 
+                                   na.rm = TRUE)) |>
+  mutate(
+    treatment_arm_label = case_when(
+      treatment_arm == 1 ~ "Arm 2 (Sofritas only)",
+      treatment_arm == 2 ~ "Arm 3 (Sofritas + Chick'nitas)",
+      TRUE ~ paste("Arm", treatment_arm))) |>
+  select(treatment_arm_label, n, chicken_rate, other_meat_rate)
+```
+
+# Secondary analyses
+
+## Predictors of selecting PMA 
+
+```{r general_sanity_checks}
+# male
+dat |> mutate(gender = fct_relevel(gender, "Female")) |>
+  h1_analysis(meat_select ~ gender)
+
+# Republicans
+dat |> mutate(rep_or_not = if_else(political_party == 'Republican', 
+                                   TRUE, FALSE)) |> 
+  h1_analysis(meat_select ~ rep_or_not)
+
+# no four-year degree
+dat |> mutate(ed_breakdown = if_else(education == '4-year college graduate' | 
+                                       education == 'More than 4-year college degree', 
+                                     FALSE, TRUE)) |>
+  h1_analysis(meat_select ~ ed_breakdown)
+
+# 10 servings of meat
+dat |> mutate(meat_breakdown = if_else(total_meat >= 10, TRUE, FALSE)) |> 
+  h1_analysis(meat_select ~ meat_breakdown)
+# age 
+dat |> h1_analysis(meat_select ~ age)
+
+# frequency of eating at Chipotle
+dat |> h1_analysis(meat_select ~ times_visited_chipotle_past_month)
+
+# frequency of heating PBs
+dat |> 
+    h1_analysis(meat_select ~ ffq_pb_freq_numeric)
+```
+
+## heterogeneous treatment effects
+
+> For each model above, we will re-run the analysis upon adding two candidate effect modifiers, interacted with arm: gender and age (continuous). We hypothesize that younger people and women will be more likely to respond to treatment.
+
+```{r het_treatment_effects}
+# with age and gender added in as controls
+
+dat |> h1_analysis(
+  meat_select ~ treatment_arm * age * gender) |> kable()
+
+# just gender
+dat |> h1_analysis(
+  meat_select ~ treatment_arm * gender) |> kable()
+```
+
+Age and gender are both significant predictors of probability of choosing meat. However, treatments don't seem more effective for younger people. Treatment two (being in arm 3) is more effective for women than it is for men. 
+
+## Was attrition (re: non-completion) different by treatment arm? 
+
+We can check this by seeing how many people filled out the attention check at all, because it was the final question
+```{r attrition_check}
+dat |>
+  group_by(treatment_arm) |>
+  summarise(n = n(),
+            completed = sum(!is.na(attention_check)),
+            prop_completed = completed / n)
+```
+
+# Robustness check
+## Attention checks
+
+Table S1 is re-testing Hypotheses h1a and h1b for the following four subsets 
+1. Primary: whether participants successfully remembered what taco they ordered. 
+2. Whether they answered an FFQ attention check question correctly, which was that they had to select "2 or times per day" as per the instructions. 
+3. that they took at least 2.5 minutes to complete it. 
+4. passed all of the above attention checks
+
+```{r prepare_data}
+# Create explicit subsets for each attention check
+
+# first
+first_check_data <- dat |> filter(merged_protein == attention_check)
+nrow(first_check_data); round(nrow(first_check_data) /nrow(dat) * 100, 2)
+first_check_data |> run_h1_analyses() |> robustness_results()
+
+#second
+second_check_data <- dat |> filter(ffq_attn_freq == '2 or more times per day')
+nrow(second_check_data); round(nrow(second_check_data) /nrow(dat) * 100, 2)
+second_check_data |>  run_h1_analyses() |> robustness_results()
+
+third_check_data <- dat |> filter(time_elapsed > 150) 
+nrow(third_check_data); round(nrow(third_check_data) /nrow(dat) * 100, 2)
+third_check_data |>  run_h1_analyses() |> robustness_results()
+
+fourth_check_data <- dat |> filter(
+  merged_protein == attention_check & 
+  ffq_attn_freq == '2 or more times per day' & 
+  time_elapsed > 150)
+nrow(fourth_check_data); round(nrow(fourth_check_data) /nrow(dat) * 100, 2)
+fourth_check_data |>  run_h1_analyses() |> robustness_results()
+```
+
+## other robustness checks
+Now social desirability bias 
+```{r sdb}
+dat <- dat |>
+  mutate(
+    correct_purpose_guess = case_when(
+      purpose_guess == "Learning how plant-based protein options affect the foods people choose" ~ TRUE,
+      !is.na(purpose_guess) ~ FALSE))
+dat |>  h1_analysis(meat_select ~ treatment_arm * correct_purpose_guess)
+# how mayn participants correctly guessed the purpose of the experiment
+dat |> sum_tab(correct_purpose_guess)
+```
+
+filled out every demographic question -- attention check was the last question
+so if they filled that out, they filled everything else out before it)
+
+```{r cca}
+dat <- dat |> mutate(cca = if_else(is.na(attention_check), FALSE, TRUE))
+dat |> h1_analysis(meat_select ~ treatment_arm * cca)
+dat |> sum_tab(cca)
+```
+
+# ordering a beverage or not?
+in real life, most people don't order beverages, but a lot of people in our sample did.
+
+```{r bev_check}
+dat <- dat |> mutate(bev_check = case_when(
+      bev_type == "No beverage" ~ TRUE,
+      !is.na(bev_type) ~ FALSE))
+dat |> h1_analysis(meat_select ~ treatment_arm * bev_check)
+round(sum(dat$bev_check == FALSE, na.rm = TRUE) / nrow(dat) * 100, 2)
+```
+
+Now multiple imputation for age and gender
+
+```{r multiple_imputation_full, echo=F, eval=F}
+init <- mice(dat, maxit=0)
+meth <- init$method
+meth[!names(meth) %in% c("age", "gender")] <- ""  # Don't impute anything else
+ 
+# Check what we're imputing
+meth[meth != ""]
+ 
+# Create a simple predictor matrix for just age and gender
+predM <- make.predictorMatrix(dat)
+predM[,] <- 0  # Reset everything
+# turn some text into factors
+char_vars <- c("purpose_guess", "education", "ethnicity", "political_party", 
+               "taco_choice", "bev_type", "tortilla_type", "regular_toppings", 
+               "block_order_pre_tacos", "block_order", "opted_out_all", "premium_toppings")
+
+# Create a simple predictor matrix for just age and gender
+predM <- make.predictorMatrix(dat)
+predM[,] <- 0  # Reset everything
+ 
+# For age: 
+predM[c("gender", "treatment_arm", "education", "ethnicity", "median_income", "political_party"), "age"] <- 1
+ 
+# For gender: use age, treatment_arm, education, and a few other stable predictors 
+predM[c("age", "treatment_arm", "education", "ethnicity", "median_income", "political_party"),  "gender"] <- 1
+ 
+# Run imputation
+set.seed(11111988)
+imputed <- mice(dat, method=meth, predictorMatrix=predM, m=5)
+imputed <- complete(imputed)
+ 
+# re-run analyses
+imputed |> h1_analysis(
+  meat_select ~ treatment_arm * age + treatment_arm * gender) |> kable()
+# compared to
+dat |> h1_analysis(
+  meat_select ~ treatment_arm * age + treatment_arm * gender) |> kable()
+
+```
+
+### M value
+```{r m-value}
+m_val <- calculate_mvalue_from_data(dat, true_effect = .05, RDAY_R0 = 0, 
+                                    total_n = 6318)
+print(m_val)
+# Sensitivity analysis
+total_n <- 6318 # see PRISMA diagram
+counts <- get_counts_from_data(dat)
+retention_rate <- counts$n_retained / total_n
+for (rday in c(-0.10, -0.05, 0, 0.05, 0.10, 0.2)) {
+  result <- calculate_mvalue_type_II(
+    n11 = counts$n11, 
+    n10 = counts$n10, 
+    n01 = counts$n01, 
+    n00 = counts$n00,
+    retention_rate = retention_rate,
+    true_effect = 0.05,
+    RDAY_R0 = rday
+  )
+  cat("\nRDAY_R0 =", sprintf("%5.2f", rday), 
+      "-> Lambda =", sprintf("%6.4f", result$lambda),
+      "-> M-value =", sprintf("%5.3f", result$m_value), "\n")
+}
+```
+# Exploratory analyses
+Indented quotes are from the pre-registration.
+> First, we will provide descriptive statistics for all analyzed
+
+```{r descriptive_stats}
+descriptive_stats <- dat |>filter(!is.na(attention_check)) |> group_by(treatment_arm)
+descriptive_stats |> grouped_sum_tab(gender)
+descriptive_stats |> grouped_sum_tab(political_party)
+descriptive_stats |> grouped_sum_tab(education)
+
+descriptive_stats |>
+  mutate(time_category = case_when(
+    time_elapsed < 120 ~ "< 2 min",
+    time_elapsed >= 120 & time_elapsed < 240 ~ "2-4 min",
+    time_elapsed >= 240 & time_elapsed < 360 ~ "4-6 min",
+    time_elapsed >= 360 & time_elapsed < 480 ~ "6-8 min",
+    time_elapsed >= 480 & time_elapsed < 600 ~ "8-10 min",
+    time_elapsed >= 600 ~ "> 10 min",
+    TRUE ~ NA_character_
+  )) |>
+  grouped_sum_tab(time_category)
+
+descriptive_stats |> grouped_sum_tab(ethnicity_combined)
+
+descriptive_stats |>
+  mutate(chipotle_visits = factor(
+    case_when(
+      times_visited_chipotle_past_month == 0 ~ "0",
+      times_visited_chipotle_past_month == 1 ~ "1",
+      times_visited_chipotle_past_month > 1 & times_visited_chipotle_past_month <= 3 ~ "2-3",
+      times_visited_chipotle_past_month > 3 & times_visited_chipotle_past_month <= 5 ~ "4-5",
+      times_visited_chipotle_past_month > 5 & times_visited_chipotle_past_month <= 10 ~ "6-10",
+      times_visited_chipotle_past_month > 10 &  times_visited_chipotle_past_month <= 20 ~ "11-20",
+      times_visited_chipotle_past_month > 20 &  times_visited_chipotle_past_month <= 30 ~ "21-30",
+      times_visited_chipotle_past_month > 30 ~ "31+", TRUE ~ NA_character_),
+    levels = c("0", "1", "2-3", "4-5", "6-10", "11-20", "21-30", "31+")
+  )) |>
+  grouped_sum_tab(chipotle_visits)
+
+# how many people say they never ate a given thing in the past month
+dat |> 
+  mutate(across(
+    .cols = starts_with("ffq_") & ends_with("_freq") & !contains("attn"),
+    .fns = ~ . == "Never",
+    .names = "never_{.col}"
+  )) |>
+  # Now group and summarize the newly created boolean columns
+  group_by(treatment_arm) |>
+  summarise(across(
+    .cols = starts_with("never_"),
+    .fns = ~ sum(., na.rm = TRUE)
+  )) |>
+  # Pivot to long format to clean up the names
+  pivot_longer(
+    cols = -treatment_arm,
+    names_to = "category",
+    values_to = "count"
+  ) |>
+  # Clean up category names
+  mutate(
+    category = str_remove(category, "never_ffq_"),
+    category = str_remove(category, "_freq")
+  ) |>
+  # Pivot to wide format with treatment arms as columns
+  pivot_wider(
+    names_from = treatment_arm,
+    values_from = count
+  ) |>
+  # Add total column
+  mutate(Total = rowSums(across(where(is.numeric))))
+
+# age category
+descriptive_stats |>
+  mutate(age_category = case_when(
+    age * 10 >= 18 & age * 10 < 35 ~ "18-34",
+    age * 10 >= 35 & age * 10 < 50 ~ "35-49",
+    age * 10 >= 50 & age * 10 < 65 ~ "50-64",
+    age * 10 >= 65 ~ "64+",
+    TRUE ~ NA_character_
+  )) |>
+  grouped_sum_tab(age_category)
+```
+
+Here is how passing attention checks relates to demographic information
+```{r attn_check_and_demographic}
+# Define demographic variables
+demographic_vars <- c("age", "gender", "political_party", "education", "ethnicity_combined", 
+                      "times_visited_chipotle_past_month", "total_meat", "treatment_arm")
+
+# Create a dataset with attention check indicators
+balance_check_dat <- dat |> 
+  mutate(
+    passed_check1 = if_else(merged_protein == attention_check, 1, 0, 0),
+    passed_check2 = if_else(ffq_attn_freq == '2 or more times per day', 1, 0, 0),
+    passed_check3 = if_else(time_elapsed > 150, 1, 0, 0))
+
+# Run regressions for each attention check
+check1_results <- h1_analysis(balance_check_dat, 
+                              as.formula(paste("passed_check1 ~", 
+                                               paste(demographic_vars, 
+                                                     collapse = " + ")))); check1_results
+check2_results <- h1_analysis(balance_check_dat,
+                              as.formula(paste("passed_check2 ~",
+                                               paste(demographic_vars, 
+                                                     collapse = " + ")))); check2_results
+check3_results <- h1_analysis(balance_check_dat,
+                              as.formula(paste("passed_check3 ~",
+                                               paste(demographic_vars,
+                                                     collapse = " + ")))); check3_results
+
+# Create a function to extract key results from each model
+extract_significant_results <- function(results, check_name) {
+  results |>
+    filter(term != "(Intercept)") |>
+    mutate(
+      attention_check = check_name,
+      significant = p.value < 0.05
+    ) |>
+    select(attention_check, term, estimate, std.error, p.value, significant)
+}
+
+# Combine and format results
+balance_results <- rbind(
+  extract_significant_results(check1_results, "Primary Attention Check"),
+  extract_significant_results(check2_results, "FFQ Attention Check"),
+  extract_significant_results(check3_results, "Time Check (>150s)")
+)
+
+# Display significant results
+balance_results |>
+  filter(significant) |>
+  arrange(attention_check, p.value) |>
+  mutate(row_num = row_number()) |>  
+  select(row_num, everything()) |>   
+  kable(
+    col.names = c("test #", "Attention Check", "Demographic Variable", "Coefficient", 
+                  "Std. Error", "P-value", "Significant"),
+    caption = "Significant Demographic Differences in Attention Check Performance",
+    digits = 3
+  )
+
+# Remove the temporary dataset
+rm(balance_check_dat)
+```
+
+> Second, we will duplicate our main analyses with excluded participants. 
+
+This is covered in the attention checks, though really we switched it up because we ended up doing our main analyses on the group that filled in a taco choice due to glitches
+
+> Third, we will explore some potential demographic moderators of our main results, e.g.:
+* Republicans will select plant-based meat analogues less frequently than will either Democrats or Independents.
+
+Covered in the main text, but also here:
+
+```{r political affiliation}
+dat |> h1_analysis(meat_select ~ political_party) |> mutate(
+    # Clean up term names
+    term = case_when(
+      term == "(Intercept)" ~ "Intercept: Democrat",
+      grepl("political_party", term) ~ gsub("political_party", "", term),
+      TRUE ~ term
+    ))
+# indeed republicans choose meat more
+#Are there heterogeneous treatment effects?
+dat |> h1_analysis(meat_select ~ combined_arms * political_party) |> mutate(
+    # Clean up term names
+    term = case_when(
+      grepl("political_party", term) ~ gsub("political_party", "", term),
+      TRUE ~ term
+    ))
+# the baseline (Intercept) here is a democrat who is exposed to 0 PMAs
+# so, low heterogeneity -- treatment reduces dems' prob of choosing meat by -0.02020, 
+# and republicans' by  -0.01850 -- and treatment effects are smaller than 
+# baseline differences between groups
+
+```
+
+> People who live in counties with a lower average personal income will select plant-based meat analogues less frequently than will people who live in counties with a lower average personal income.
+
+```{r income_test}
+dat |> h1_analysis(meat_select ~ income_10k)
+# No
+dat |>
+  mutate(
+    meat_selection_factor = case_when(
+      is.na(meat_select) ~ "Would not select a filling",
+      meat_select == 0 ~ "No",
+      meat_select == 1 ~ "Yes",
+      TRUE ~ NA_character_
+    ) |> factor(levels = c("No", "Yes", "Would not select a filling"))
+  ) |>
+  ggplot( aes(x = meat_selection_factor, y = median_income)) +
+  geom_boxplot(fill = "lightblue") +
+  labs(
+    title = "Median County Income by Meat Selection Decision",
+    x = "Meat Selection",
+    y = "Median Household Income ($)"
+  ) +
+  theme_minimal() +
+  scale_y_continuous(labels = scales::dollar_format())
+```
+
+How about the proportion of one's county that voted for Trump in 2020?
+
+```{r political_test}
+dat |>  h1_analysis(meat_select ~ per_gop)
+dat |> h1_analysis(meat_select ~ per_gop*treatment_arm)
+```
+ 
+> People with more education will select plant-based meat analogues more frequently than will people with less education. 
+ 
+```{r education_analysis}
+# education could be a linear var where we'd regress on years of education
+dat |> h1_analysis(meat_select ~ education_linear)
+dat |> h1_analysis((meat_select ~ treatment_arm*education_linear))
+# but what about nonlinear effects (e.g. if college 
+# grads eat more meat than HS grads or something)
+
+dat |> h1_analysis(meat_select ~ education_combined) |>
+      # Clean up term names
+  mutate(term = case_when(
+      grepl("education_combined", term) ~ gsub("education_combined", "", term),
+      TRUE ~ term))
+# yep, more education = less meat
+
+# heterogeneous treatment effects?
+dat |> h1_analysis(meat_select ~ education_combined * combined_arms) |>
+    mutate(term = case_when(
+      grepl("education_combined", term) ~ gsub("education_combined", "", term),
+      TRUE ~ term))
+#' no interaction is larger in the opposite direction than the sole effect of 'combined_arms',
+#'  which suggests that treatment was most effective for people in the ref category
+```
+
+> Ethnicity will not impact principal taco filling selection.
+
+```{r ethnicity_check}
+dat |> h1_analysis(meat_select ~ ethnicity_combined) |>
+      mutate(term = case_when(
+      grepl("ethnicity_combined", term) ~ gsub("ethnicity_combined", "", term),
+      TRUE ~ term))
+# African American and Latino participants choose meat more frequently
+# heterogeneous treatment effects?
+```
+
+
+> We will also explore some potential relationships between self-reported diet and consumer choice. For instance: 
+
+* People will more frequently select the specific animal-based meat in their tacos which * they state that they consumed the most in the past week. 
+* H5a1: P(Beef Barbacoa| beef 5-6x in past week) + P(Steak | beef 5-6x in past week) > * P(Chicken | chicken <5x in past week) 
+* H5a2: P(Beef Barbacoa | beef 5-6x in past week) + P(Steak | beef 5-6x in past wk) > * P(Carnitas | pork <5x in past wk) 
+* H5a3: P(Beef Barbacoa | beef 5-6x in past week) + P(Steak | beef 5-6x in past week) > * P(Veggie)
+* H5a4: P(Beef Barbacoa | beef 5-6x in past week) + P(Steak | beef 5-6x in past week) > * P(Sofritas) 	
+* H5a5: P(Beef Barbacoa | beef 5-6x in past week) + P(Steak | beef 5-6x in past week) > * P(Chick’nitas) 
+* H5a6: P(Carnitas | pork 5-6x in past week) > P(Steak | beef <5x in past week) 
+* H5a7: P(Carnitas | pork 5-6x in past week) > P(Beef Barbacoa | beef <5x in past week)
+* H5a8: P(Carnitas | pork 5-6x in past week) > P(Chicken | chicken <5x in past week) 
+* H5a9: P(Carnitas | pork 5-6x in past week) > P(Veggie) 	
+* H5a10: P(Carnitas | pork 5-6x in past week) > P(Sofritas) 	
+* H5a11: P(Carnitas | pork 5-6x in past week) > P(Chick’nitas)
+* H5a12: P(Chicken | chicken 5-6x in past week) > P(Steak | beef <5x in past week) 
+* H5a13: P(Chicken | chicken 5-6x in past week) > P(Beef Barbacoa | beef <5x in past * week) 
+* H5a14: P(Chicken | chicken 5-6x in past week) > P(Carnitas | pork <5x in past week) 
+* H5a15: P(Chicken | chicken 5-6x in past week) > P(Veggie) 	
+* H5a16: P(Chicken | chicken 5-6x in past week) > P(Sofritas) 	
+* H5a17: P(Chicken | chicken 5-6x in past week) > P(Chick’nitas)
+People who regularly consume plant-based meat or tofu will select plant-based meat analogues (PMA) for their tacos more frequently than those who do not consume them regularly.
+* H5b1: P(Sofritas | PMA/tofu >2x in past week) > P (Sofritas | PMA/tofu <2x in past * week)
+* H5b2: P(Chick’nitas | PMA/tofu >2x in past week) > P (Chick’nitas | PMA/tofu <2x in * past week)
+* People who have eaten neither eggs nor dairy in the past week will select plant-based * meat analogues and/or veggie tacos at a higher rate than people who have eaten eggs and * dairy.
+* H5c: P(Sofritas | eggs=0 + dairy=0) + P(Chick’nitas | eggs=0 + dairy=0) + P(Veggie | * eggs=0 + dairy=0) > P(Sofritas | eggs>0 + dairy>0) + P(Chick’nitas | eggs>0 + dairy>0) * + P(Veggie | eggs>0 + dairy>0)
+* People who have not eaten meat in the past week will be more likely to select * plant-based meat analogues than those who have.
+* H5d: P(Sofritas | beef=0 + chicken=0 + pork=0 + sea=0) + P(Chick’nitas | beef=0 + * chicken=0 + pork=0 + sea=0) + P(Veggie | beef=0 + chicken=0 + pork=0 + sea=0) > * P(Sofritas | beef>0 or chicken>0 or pork>0 or sea>0) + P(Chick’nitas | beef>0 or * chicken>0 or pork>0 or sea>0) + P(Veggie | beef>0 or chicken>0 or pork>0 or sea>0)
+
+```{r h5_test}
+# Create a separate dataframe for hypothesis 5 testing
+dat_h5 <- dat |>
+  mutate(
+    # Beef consumption frequency indicators
+    beef_high = ffq_cow_freq %in% c("5-6 times in the past week", "1 time per day", "2 or more times per day"),
+    beef_low = !beef_high,
+    
+    # Pork consumption frequency indicators
+    pork_high = ffq_pig_freq %in% c("5-6 times in the past week", "1 time per day", "2 or more times per day"),
+    pork_low = !pork_high,
+    
+    # Chicken consumption frequency indicators
+    chicken_high = ffq_hen_freq %in% c("5-6 times in the past week", "1 time per day", "2 or more times per day"),
+    chicken_low = !chicken_high,
+    
+    # Plant-based meat/tofu consumption
+    pb_high = ffq_pb_freq %in% c("3-4 times in the past week", "5-6 times in the past week", "1 time per day", "2 or more times per day"),
+    pb_low = !pb_high,
+    
+    # Egg and dairy indicators
+    eggs_none = ffq_eggs_freq == "Never",
+    dairy_none = ffq_dairy_freq == "Never",
+    vegan_diet = eggs_none & dairy_none,
+    
+    # Meat avoidance indicator (vegetarian diet)
+    meat_none = ffq_cow_freq == "Never" & ffq_pig_freq == "Never" & 
+                ffq_hen_freq == "Never" & ffq_fish_freq == "Never",
+    
+    # Taco choice indicators
+    chose_beef = taco_choice %in% c("Beef barbacoa", "Steak"),
+    chose_carnitas = taco_choice == "Carnitas",
+    chose_chicken = taco_choice == "Chicken",
+    chose_veggie = taco_choice == "Veggie (includes guacamole)",
+    chose_sofritas = taco_choice == "Sofritas (plant-based protein)",
+    chose_chicknitas = taco_choice == "Chick'nitas (plant-based protein)",
+    chose_plant_based = chose_veggie | chose_sofritas | chose_chicknitas)
+
+
+# H5a1: People who eat beef frequently are more likely to choose beef over chicken
+# H5a1: P(Beef Barbacoa| beef 5-6x in past week) + P(Steak | beef 5-6x in past week) > P(Chicken | chicken <5x in past week)
+h5a1 <- lm_robust(chose_beef ~ beef_high, data = dat_h5 |> filter(beef_high | chicken_low))
+h5a1_summary <- summary(h5a1)
+cat("H5a1: Frequent beef eaters choose beef over infrequent chicken eaters choose chicken\n")
+print(h5a1_summary)
+
+# H5a2: Frequent beef eaters choose beef over infrequent pork eaters choose carnitas
+# H5a2: P(Beef Barbacoa | beef 5-6x in past week) + P(Steak | beef 5-6x in past wk) > P(Carnitas | pork <5x in past wk)
+h5a2 <- lm_robust(chose_beef ~ beef_high, data = dat_h5 |> filter(beef_high | pork_low))
+cat("\nH5a2: Frequent beef eaters choose beef over infrequent pork eaters choose carnitas\n")
+print(summary(h5a2))
+
+# H5a3: Frequent beef eaters choose beef more than people choose veggie options
+# H5a3: P(Beef Barbacoa | beef 5-6x in past week) + P(Steak | beef 5-6x in past week) > P(Veggie)
+h5a3 <- lm_robust(chose_beef ~ beef_high, data = dat_h5 |> filter(beef_high))
+cat("\nH5a3: Frequent beef eaters choose beef more than people choose veggie options\n")
+print(summary(h5a3))
+
+# H5a4: Frequent beef eaters choose beef more than people choose sofritas
+# H5a4: P(Beef Barbacoa | beef 5-6x in past week) + P(Steak | beef 5-6x in past week) > P(Sofritas)
+h5a4 <- lm_robust(chose_beef ~ beef_high, data = dat_h5 |> filter(beef_high))
+cat("\nH5a4: Frequent beef eaters choose beef more than people choose sofritas\n")
+print(summary(h5a4))
+
+# H5a5: Frequent beef eaters choose beef more than people choose chick'nitas
+# H5a5: P(Beef Barbacoa | beef 5-6x in past week) + P(Steak | beef 5-6x in past week) > P(Chick'nitas)
+h5a5 <- lm_robust(chose_beef ~ beef_high, data = dat_h5 |> filter(beef_high))
+cat("\nH5a5: Frequent beef eaters choose beef more than people choose chick'nitas\n")
+print(summary(h5a5))
+
+# H5a6-H5a11: Tests for frequent pork eaters similar to H5a1-H5a5
+# H5a6: P(Carnitas | pork 5-6x in past week) > P(Steak | beef <5x in past week)
+h5a6 <- lm_robust(chose_carnitas ~ pork_high, data = dat_h5 |> filter(pork_high | beef_low))
+cat("\nH5a6: Frequent pork eaters choose carnitas over infrequent beef eaters choose steak\n")
+print(summary(h5a6))
+
+# H5a7: P(Carnitas | pork 5-6x in past week) > P(Beef Barbacoa | beef <5x in past week)
+h5a7 <- lm_robust(chose_carnitas ~ pork_high, data = dat_h5 |> filter(pork_high | beef_low))
+cat("\nH5a7: Frequent pork eaters choose carnitas over infrequent beef eaters choose beef barbacoa\n")
+print(summary(h5a7))
+
+# H5a8: P(Carnitas | pork 5-6x in past week) > P(Chicken | chicken <5x in past week)
+h5a8 <- lm_robust(chose_carnitas ~ pork_high, data = dat_h5 |> filter(pork_high | chicken_low))
+cat("\nH5a8: Frequent pork eaters choose carnitas over infrequent chicken eaters choose chicken\n")
+print(summary(h5a8))
+
+# H5a9: P(Carnitas | pork 5-6x in past week) > P(Veggie)
+h5a9 <- lm_robust(chose_carnitas ~ pork_high, data = dat_h5 |> filter(pork_high))
+cat("\nH5a9: Frequent pork eaters choose carnitas more than people choose veggie options\n")
+print(summary(h5a9))
+
+# H5a10: P(Carnitas | pork 5-6x in past week) > P(Sofritas)
+h5a10 <- lm_robust(chose_carnitas ~ pork_high, data = dat_h5 |> filter(pork_high))
+cat("\nH5a10: Frequent pork eaters choose carnitas more than people choose sofritas\n")
+print(summary(h5a10))
+
+# H5a11: P(Carnitas | pork 5-6x in past week) > P(Chick'nitas)
+h5a11 <- lm_robust(chose_carnitas ~ pork_high, data = dat_h5 |> filter(pork_high))
+cat("\nH5a11: Frequent pork eaters choose carnitas more than people choose chick'nitas\n")
+print(summary(h5a11))
+
+# H5a12: P(Chicken | chicken 5-6x in past week) > P(Steak | beef <5x in past week)
+h5a12 <- lm_robust(chose_chicken ~ chicken_high, data = dat_h5 |> filter(chicken_high | beef_low))
+cat("\nH5a12: Frequent chicken eaters choose chicken over infrequent beef eaters choose steak\n")
+print(summary(h5a12))
+
+# H5a13: P(Chicken | chicken 5-6x in past week) > P(Beef Barbacoa | beef <5x in past week)
+h5a13 <- lm_robust(chose_chicken ~ chicken_high, data = dat_h5 |> filter(chicken_high | beef_low))
+cat("\nH5a13: Frequent chicken eaters choose chicken over infrequent beef eaters choose beef barbacoa\n")
+print(summary(h5a13))
+
+# H5a14: P(Chicken | chicken 5-6x in past week) > P(Carnitas | pork <5x in past week)
+h5a14 <- lm_robust(chose_chicken ~ chicken_high, data = dat_h5 |> filter(chicken_high | pork_low))
+cat("\nH5a14: Frequent chicken eaters choose chicken over infrequent pork eaters choose carnitas\n")
+print(summary(h5a14))
+
+# H5a15: P(Chicken | chicken 5-6x in past week) > P(Veggie)
+h5a15 <- lm_robust(chose_chicken ~ chicken_high, data = dat_h5 |> filter(chicken_high))
+cat("\nH5a15: Frequent chicken eaters choose chicken more than people choose veggie options\n")
+print(summary(h5a15))
+
+# H5a16: P(Chicken | chicken 5-6x in past week) > P(Sofritas)
+h5a16 <- lm_robust(chose_chicken ~ chicken_high, data = dat_h5 |> filter(chicken_high))
+cat("\nH5a16: Frequent chicken eaters choose chicken more than people choose sofritas\n")
+print(summary(h5a16))
+
+# H5a17: P(Chicken | chicken 5-6x in past week) > P(Chick'nitas)
+h5a17 <- lm_robust(chose_chicken ~ chicken_high, data = dat_h5 |> filter(chicken_high))
+cat("\nH5a17: Frequent chicken eaters choose chicken more than people choose chick'nitas\n")
+print(summary(h5a17))
+
+# H5b: Plant-based meat/tofu consumers more likely to choose plant-based options
+# H5b1: P(Sofritas | PMA/tofu >2x in past week) > P (Sofritas | PMA/tofu <2x in past week)
+h5b1 <- lm_robust(chose_sofritas ~ pb_high, data = dat_h5)
+cat("\nH5b1: Frequent plant-based meat eaters more likely to choose sofritas\n")
+print(summary(h5b1))
+
+# H5b2: P(Chick'nitas | PMA/tofu >2x in past week) > P (Chick'nitas | PMA/tofu <2x in past week)
+h5b2 <- lm_robust(chose_chicknitas ~ pb_high, data = dat_h5)
+cat("\nH5b2: Frequent plant-based meat eaters more likely to choose chick'nitas\n")
+print(summary(h5b2))
+
+# H5c: Vegans more likely to choose plant-based options
+# H5c: P(Sofritas | eggs=0 + dairy=0) + P(Chick'nitas | eggs=0 + dairy=0) + P(Veggie | eggs=0 + dairy=0) > 
+#      P(Sofritas | eggs>0 + dairy>0) + P(Chick'nitas | eggs>0 + dairy>0) + P(Veggie | eggs>0 + dairy>0)
+h5c <- lm_robust(chose_plant_based ~ vegan_diet, data = dat_h5)
+cat("\nH5c: Vegans more likely to choose plant-based options\n")
+print(summary(h5c))
+
+# H5d: Vegetarians more likely to choose plant-based options
+# H5d: P(Sofritas | beef=0 + chicken=0 + pork=0 + sea=0) + P(Chick'nitas | beef=0 + chicken=0 + pork=0 + sea=0) + 
+#      P(Veggie | beef=0 + chicken=0 + pork=0 + sea=0) > 
+#      P(Sofritas | beef>0 or chicken>0 or pork>0 or sea>0) + P(Chick'nitas | beef>0 or chicken>0 or pork>0 or sea>0) + 
+#      P(Veggie | beef>0 or chicken>0 or pork>0 or sea>0)
+h5d <- lm_robust(chose_plant_based ~ meat_none, data = dat_h5)
+cat("\nH5d: Vegetarians more likely to choose plant-based options\n")
+print(summary(h5d))
+
+# Clean up the environment by removing the temporary dataset
+rm(dat_h5)
+
+```
+
+H6: Increasing the number of plant-based meat analogue options will decrease the proportion of consumers declining to select any primary taco filling.
+Ha6: The proportion of consumers declining any primary taco filling will decrease from Arm 1 to Arm 2. 
+P(None | Arm=2) < P(None | Arm=1)
+H6b: The proportion of consumers declining any primary taco filling will decrease from Arm 1 to Arm 3.
+	P(None | Arm=3) < P(None | Arm=1)
+H6c: A dose-response relationship will exist in that the proportion of consumers declining any primary taco filling will decrease from Arm 1 to Arm 2 to Arm 3.
+P(None | Arm=3) < P(None | Arm=2) < P(None | Arm=1)
+H6d: The proportion of customers declining to select any primary taco filling will be greater in Arm 1 than in Arms 2 and 3 combined.
+
+```{r h6}
+# Create a separate dataframe for hypothesis 6 testing
+dat_h6 <- dat |>
+  mutate(
+    # Create indicator for declining any taco filling
+    declined_filling = taco_choice == "I would not order any of these fillings.",
+    
+    # Treatment arm as numeric (0, 1, 2) for dose-response tests
+    arm_numeric = as.numeric(treatment_arm) - 1,
+    
+    # Create factor for treatment arm with proper ordering
+    arm = factor(treatment_arm, 
+                 levels = c(1, 2, 3),
+                 labels = c("Arm 1", "Arm 2", "Arm 3"))
+  )
+
+# H6a: The proportion of consumers declining any primary taco filling will decrease from Arm 1 to Arm 2
+# P(None | Arm=2) < P(None | Arm=1)
+h6a <- lm_robust(declined_filling ~ I(arm == "Arm 2"), 
+                data = dat_h6 |> filter(arm %in% c("Arm 1", "Arm 2")))
+cat("H6a: Proportion declining filling lower in Arm 2 than Arm 1\n")
+print(summary(h6a))
+
+# H6b: The proportion of consumers declining any primary taco filling will decrease from Arm 1 to Arm 3
+# P(None | Arm=3) < P(None | Arm=1)
+h6b <- lm_robust(declined_filling ~ I(arm == "Arm 3"), 
+                data = dat_h6 |> filter(arm %in% c("Arm 1", "Arm 3")))
+cat("\nH6b: Proportion declining filling lower in Arm 3 than Arm 1\n")
+print(summary(h6b))
+
+# H6c: A dose-response relationship exists (Arm 3 < Arm 2 < Arm 1)
+# First test overall effect using arm as numeric (linear trend)
+h6c_linear <- lm_robust(declined_filling ~ arm_numeric, data = dat_h6)
+cat("\nH6c: Dose-response relationship (linear trend test)\n")
+print(summary(h6c_linear))
+
+# Test specifically Arm 2 vs Arm 3 to complete the dose-response check
+h6c_2vs3 <- lm_robust(declined_filling ~ I(arm == "Arm 3"), 
+                     data = dat_h6 |> filter(arm %in% c("Arm 2", "Arm 3")))
+cat("\nH6c: Specific test of Arm 3 vs Arm 2\n")
+print(summary(h6c_2vs3))
+
+# H6d: The proportion declining to select any primary taco filling will be greater in Arm 1 than in Arms 2 and 3 combined
+h6d <- lm_robust(declined_filling ~ I(arm != "Arm 1"), data = dat_h6)
+cat("\nH6d: Proportion declining filling higher in Arm 1 than Arms 2 and 3 combined\n")
+print(summary(h6d))
+
+# Alternative approach using proportion tests for robustness with small counts
+cat("\nAlternative tests using prop.test:\n")
+
+# H6a with prop.test
+h6a_prop <- prop.test(
+  x = c(
+    sum(dat_h6$declined_filling[dat_h6$arm == "Arm 1"]), 
+    sum(dat_h6$declined_filling[dat_h6$arm == "Arm 2"])
+  ),
+  n = c(
+    sum(dat_h6$arm == "Arm 1"), 
+    sum(dat_h6$arm == "Arm 2")
+  )
+)
+cat("\nH6a with prop.test (Arm 1 vs Arm 2):\n")
+print(h6a_prop)
+
+# H6b with prop.test
+h6b_prop <- prop.test(
+  x = c(
+    sum(dat_h6$declined_filling[dat_h6$arm == "Arm 1"]), 
+    sum(dat_h6$declined_filling[dat_h6$arm == "Arm 3"])
+  ),
+  n = c(
+    sum(dat_h6$arm == "Arm 1"), 
+    sum(dat_h6$arm == "Arm 3")
+  )
+)
+cat("\nH6b with prop.test (Arm 1 vs Arm 3):\n")
+print(h6b_prop)
+
+# H6d with prop.test
+h6d_prop <- prop.test(
+  x = c(
+    sum(dat_h6$declined_filling[dat_h6$arm == "Arm 1"]), 
+    sum(dat_h6$declined_filling[dat_h6$arm != "Arm 1"])
+  ),
+  n = c(
+    sum(dat_h6$arm == "Arm 1"), 
+    sum(dat_h6$arm != "Arm 1")
+  )
+)
+cat("\nH6d with prop.test (Arm 1 vs Arms 2+3 combined):\n")
+print(h6d_prop)
+
+# Clean up
+rm(dat_h6)
+```
+Finally, we will explore whether frequent Chipotle customers will be more likely to identify as novel, and therefore select, the Chick’nitas option in arm 3. Specifically, participants who have eaten at a Chipotle more than 3 times in the past 3 months will be more likely to select Chick’nitas than those who have not eaten at a Chipotle in the past 3 months.
+H7: P(Chick’nitas | Chipotle>3) > P(Chick’nitas | Chipotle=0)
+
+```{r h7}
+# Create a dataframe for hypothesis 7 testing
+dat_h7 <- dat |>
+  mutate(
+    # Create indicators for Chipotle visit frequency
+    chipotle_frequent = times_visited_chipotle_past_month > 3,
+    chipotle_never = times_visited_chipotle_past_month == 0,
+    
+    # Create indicator for selecting Chick'nitas
+    chose_chicknitas = taco_choice == "Chick'nitas (plant-based protein)"
+  ) |>
+  # Filter for only participants in arm 3 (where Chick'nitas was available)
+  filter(treatment_arm == 3)
+
+# H7: Frequent Chipotle customers (>3 visits) more likely to select Chick'nitas than non-customers (0 visits)
+# Analysis with all data
+h7_all <- lm_robust(chose_chicknitas ~ chipotle_frequent, 
+                   data = dat_h7 |> filter(chipotle_frequent | chipotle_never))
+cat("H7: Frequent vs. never Chipotle customers selecting Chick'nitas (all data)\n")
+print(summary(h7_all))
+
+# Analysis excluding >100 visits
+h7_ex100 <- lm_robust(chose_chicknitas ~ chipotle_frequent, 
+                     data = dat_h7 |> 
+                       filter((chipotle_frequent | chipotle_never) & 
+                              times_visited_chipotle_past_month <= 100))
+cat("\nH7: Frequent vs. never Chipotle customers selecting Chick'nitas (excluding >100 visits)\n")
+print(summary(h7_ex100))
+
+# Analysis excluding >30 visits
+h7_ex30 <- lm_robust(chose_chicknitas ~ chipotle_frequent, 
+                    data = dat_h7 |> 
+                      filter((chipotle_frequent | chipotle_never) & 
+                             times_visited_chipotle_past_month <= 30))
+cat("\nH7: Frequent vs. never Chipotle customers selecting Chick'nitas (excluding >30 visits)\n")
+print(summary(h7_ex30))
+
+# Analysis excluding >10 visits
+h7_ex10 <- lm_robust(chose_chicknitas ~ chipotle_frequent, 
+                    data = dat_h7 |> 
+                      filter((chipotle_frequent | chipotle_never) & 
+                             times_visited_chipotle_past_month <= 10))
+cat("\nH7: Frequent vs. never Chipotle customers selecting Chick'nitas (excluding >10 visits)\n")
+print(summary(h7_ex10))
+
+# Alternative analysis using proportion test
+h7_prop <- with(
+  dat_h7 |> filter(chipotle_frequent | chipotle_never),
+  prop.test(
+    x = c(sum(chose_chicknitas[chipotle_frequent]), sum(chose_chicknitas[chipotle_never])),
+    n = c(sum(chipotle_frequent), sum(chipotle_never))
+  )
+)
+cat("\nH7 with prop.test (Frequent vs. never Chipotle customers selecting Chick'nitas):\n")
+print(h7_prop)
+
+# Clean up
+rm(dat_h7)
+
+```
+
+# *Very* exploratory stuff
+None of this is in the pre-reg but some of it might be interesting
+
+## block order
+Does the order in which the tasks were presented (select a pen, select a taco, select a shirt) matter to whether people chose meat in their taco? 
+
+They could first see tacos (in which case they're listed as 'None' in the variable), or they could see pens then tacos, shirts then tacos, shirts then pens then tacos, or pens then shirts then tacos
+
+```{r block_order_analysis}
+# intercept is they saw taco first
+dat |> h1_analysis(meat_select ~ block_order_pre_tacos) |> 
+    mutate(term = case_when(
+    term == "(Intercept)" ~ "Intercept",
+    str_detect(term, "block_order_pre_tacos") ~ str_replace(term, "block_order_pre_tacos", ""),
+    TRUE ~ term
+  ))
+
+# exposed to tacos first vs everything else?
+dat |> 
+  mutate(tacos_first = ifelse(block_order_pre_tacos == "None", "Tacos First", "Other First")) |>
+  h1_analysis(meat_select ~ tacos_first)
+
+# Group people who saw pens (either alone or with shirts) vs. those who just saw tacos
+dat |> 
+  mutate(saw_pens = case_when(
+    str_detect(block_order_pre_tacos, "Pen") ~ "Saw Pens",
+    block_order_pre_tacos == "None" ~ "Tacos First",
+    TRUE ~ NA_character_
+  )) |>
+  filter(!is.na(saw_pens)) |>
+  h1_analysis(meat_select ~ saw_pens)
+
+# Group people who saw shirts (either alone or with pens) vs. those who just saw tacos
+dat |> 
+  mutate(saw_shirts = case_when(
+    str_detect(block_order_pre_tacos, "Shirt") ~ "Saw Shirts",
+    block_order_pre_tacos == "None" ~ "Tacos First",
+    TRUE ~ NA_character_
+  )) |>
+  filter(!is.na(saw_shirts)) |>
+  h1_analysis(meat_select ~ saw_shirts)
+
+# exposed to one 'not taco thing' first, 'two not taco thing' first, or tacos? 
+dat |> 
+  mutate(decoy_count = case_when(
+    block_order_pre_tacos == "None" ~ "No Decoys",
+    block_order_pre_tacos %in% c("Pen", "Shirt") ~ "One Decoy",
+    block_order_pre_tacos %in% c("Pen-Shirt", "Shirt-Pen") ~ "Two Decoys",
+    TRUE ~ NA_character_
+  )) |>
+  h1_analysis(meat_select ~ decoy_count)
+
+# Calculate how many people who saw tacos first correctly remembered their order
+dat |> 
+  filter(block_order_pre_tacos == "None") |>
+  summarise(
+    total_count = n(),
+    correct_count = sum(merged_protein == attention_check, na.rm = TRUE),
+    correct_fraction = mean(merged_protein == attention_check, na.rm = TRUE)
+  )
+
+# does seeing tacos first make ordering chik'nitas more likely
+
+dat |> 
+  filter(treatment_arm == 3) |>  # Only include treatment arm 3 where Chick'nitas was available
+  group_by(block_order_pre_tacos) |>
+  summarise(
+    n_total = n(),
+    n_chicknitas = sum(taco_choice == "Chick'nitas (plant-based protein)", na.rm = TRUE),
+    prop_chicknitas = mean(taco_choice == "Chick'nitas (plant-based protein)", na.rm = TRUE),
+    .groups = "drop"
+  )
+#. block order simplified
+dat |> 
+  h1_analysis(meat_select ~ block_order_simplified)
+
+```
+
+## FFQ stuff
+
+```{r FFQ_stuff}
+
+# Check distribution of dietary categories
+diet_distribution <- dat |>
+  count(diet_category_ffq) |>
+  mutate(percentage = n / sum(n) * 100)
+
+print(diet_distribution)
+
+# 1. Examine baseline meat selection rates by dietary category
+baseline_rates <- dat |>
+  group_by(diet_category_ffq) |>
+  summarize(
+    n = n(),
+    meat_selection_rate = mean(meat_select, na.rm = TRUE),
+    se = sd(meat_select, na.rm = TRUE) / sqrt(n())
+  )
+
+print("Baseline meat selection rates by dietary category:")
+print(baseline_rates)
+
+# 2. Compare treatment effects across dietary categories
+# Add the predicted treatment effects back to the data
+complete_cases <- complete.cases(dat)  # Define complete_cases
+dat_subset <- dat[complete_cases, ]
+
+# First, run the model to get the overall treatment effect
+treatment_model <- h1_analysis(dat, meat_select ~ PMA_count)
+overall_effect <- treatment_model$estimate[treatment_model$term == "PMA_count"]
+
+# Then run a separate model for each dietary category
+treatment_effects <- dat |>
+  group_by(diet_category_ffq) |>
+  group_modify(~{
+    # Run model within each diet category
+    model <- h1_analysis(.x, meat_select ~ PMA_count)
+    effect <- model$estimate[model$term == "PMA_count"]
+    
+    # Return a one-row data frame with results
+    data.frame(
+      n = nrow(.x),
+      effect = effect, 
+      se = model$std.error[model$term == "PMA_count"]
+    )
+  })
+print("Average treatment effects by dietary category:")
+print(treatment_effects)
+
+# 3. Create a visualization of treatment effects by dietary category
+ggplot(treatment_effects, aes(x = diet_category_ffq, y = effect)) +
+  geom_col(fill = "steelblue") +
+  geom_errorbar(aes(ymin = effect - 1.96*se, 
+                    ymax = effect + 1.96*se), 
+                width = 0.2) +
+  theme_minimal() +
+  labs(title = "Treatment Effects by Dietary Category",
+       x = "Dietary Category",
+       y = "Effect of Adding One PBMA",
+       subtitle = "Negative values indicate decreased meat selection with more PBMAs") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# 4. Interaction between treatment and diet category using a regression model
+# Run interaction model
+interaction_model <- h1_analysis(dat, meat_select ~ PMA_count * diet_category_ffq)
+
+# Extract the results by category
+interaction_model |>
+  filter(grepl("PMA_count", term)) |>
+  mutate(
+    diet_category_ffq = case_when(
+      term == "PMA_count" ~ "Vegan",  # This is the reference category, not "Overall"
+      TRUE ~ gsub("PMA_count:diet_category_ffq", "", term)
+    ),
+    # For non-reference categories, compute the total effect
+    total_effect = case_when(
+      diet_category_ffq == "Vegan" ~ estimate,
+      TRUE ~ estimate + interaction_model$estimate[interaction_model$term == "PMA_count"]
+    ))
+
+
+# Check the distribution of total meat servings
+summary(dat$total_meat)
+hist(dat$total_meat, breaks = 20, 
+     main = "Distribution of Weekly Meat Servings", 
+     xlab = "Total Weekly Meat Servings")
+
+# Use linear model to predict meat selection based on meat consumption and treatment
+dat |> h1_analysis(meat_select ~ total_meat * PMA_count)
+
+# another way to visualize this
+dat |>
+  select(ffq_cow_freq, ffq_pig_freq, ffq_hen_freq, ffq_fish_freq, ffq_dairy_freq, ffq_eggs_freq) |>
+  pivot_longer(
+    cols = everything(),
+    names_to = "food_type",
+    values_to = "frequency"
+  ) |>
+  mutate(
+    food_type = case_when(
+      food_type == "ffq_cow_freq" ~ "Beef",
+      food_type == "ffq_pig_freq" ~ "Pork",
+      food_type == "ffq_hen_freq" ~ "Chicken", 
+      food_type == "ffq_fish_freq" ~ "Fish",
+      food_type == "ffq_dairy_freq" ~ "Dairy",
+      food_type == "ffq_eggs_freq" ~ "Eggs"
+    ),
+    # Order food types in a logical grouping
+    food_type = factor(food_type, levels = c("Chicken", "Beef", "Pork", "Fish", "Eggs", "Dairy")),
+    # Order frequencies with lowest at bottom
+    frequency = factor(frequency, levels = rev(c(
+      "Never", 
+      "1 time in the past week",
+      "2 times in the past week",
+      "3-4 times in the past week",
+      "5-6 times in the past week",
+      "1 time per day",
+      "2 or more times per day"
+    )))) |>
+  filter(!is.na(frequency)) |>
+  ggplot(aes(x = food_type, fill = frequency)) +
+  geom_bar(position = "fill") +
+  scale_y_continuous(labels = scales::percent) +
+  scale_fill_manual(values = c(
+    "Never" = "#FF8A80",  # Pink/red
+    "1 time in the past week" = "#A5D6A7",  # Light green
+    "2 times in the past week" = "#90CAF9",  # Light blue
+    "3-4 times in the past week" = "#CE93D8",  # Light purple
+    "5-6 times in the past week" = "#4CAF50",  # Green
+    "1 time per day" = "#FDD835",  # Yellow
+    "2 or more times per day" = "#FF5722"  # Orange
+  )) +
+  labs(
+    title = "Food Consumption Frequency Distribution",
+    x = "Food Type",
+    y = "Proportion",
+    fill = "Consumption Frequency"
+  ) +
+  theme_minimal()
+
+# also, who orders strictly vegan stuff?
+dat |>
+  group_by(diet_category_ffq) |>
+  summarise(
+    total = n(),
+    veg_tacos = sum(meat_select == 0, na.rm = TRUE),
+    vegan_tacos = sum(is_vegan == 1, na.rm = TRUE),
+    prop_veg = mean(meat_select == 0, na.rm = TRUE),
+    prop_vegan = mean(is_vegan == 1, na.rm = TRUE)
+  )
+# interesting that 35% of people who say they "never" eat meat, fish,
+# dairy or eggs order vegan tacos as well, I'd probably highlight this
+```
+
+### Generalized Random Forest check
+This is speculative, just FYI
+```{r grf}
+
+## Generalized Random Forest to predict vegetarian selection
+
+# Step 1 1. Create a proper preprocessing recipe that handles factors correctly
+# First identify variables to use (skip ID variables and outcome)
+
+# originally we included a meat_frequency FFQ var like so
+# dat <- dat |>
+#   rowwise() |> 
+#   mutate(meat_freq = sum(cow_numeric, pig_numeric, hen_numeric, fish_numeric)) |>
+#   ungroup() 
+
+# but the effect of that is to make the calibration much worse.
+# what's happening is that it's a strong predictor of the outcome but not of 
+# heterogeneity 
+
+feature_vars <- dat |>
+  select(age, gender, times_visited_chipotle_past_month,
+         education_linear, ethnicity_combined, political_party,
+         median_income, per_gop, ffq_pb_freq_numeric) |>
+  names()
+
+# Step 2: Create and apply preprocessing recipe with complete fixes
+X <- recipe(~ ., data = dat[, feature_vars]) |>
+  step_string2factor(political_party) |> 
+  step_unknown(gender, ethnicity_combined, political_party) |> 
+  step_dummy(gender, ethnicity_combined, political_party) |> 
+  step_rm(ends_with("_unknown")) |> 
+  step_zv(all_predictors()) |> 
+  step_impute_median(all_numeric_predictors()) |> 
+  step_normalize(all_numeric_predictors()) |> 
+  prep() |> 
+  bake(new_data = NULL) |> 
+  as.matrix()
+
+print(paste("Number of variables:", ncol(X)))
+
+# Use PMA_count directly as the treatment variable
+# (PMA_count is 0,1, or 2 for how many PMAs a person sees on their menu)
+W <- dat$PMA_count
+
+# Extract outcome 
+Y <- dat$meat_select
+
+# Remove rows with missing values in any of our key variables
+complete_cases <- !is.na(W) & !is.na(Y)
+# note that Y being missing means that people said "I would not select a taco"
+# but we are ultimately interested in the effects of treatment on people who do 
+# select a taco. 
+X <- X[complete_cases, ]
+W <- W[complete_cases]
+Y <- Y[complete_cases]
+
+# Step 3: Run Causal Forest Algorithm
+# define core params here
+CF_NUM_TREES <- 2000
+CF_MIN_NODE_SIZE <- 5
+CF_SAMPLE_FRACTION <- 0.5
+CF_HONESTY_FRACTION <- 0.5
+
+cf <- causal_forest(
+  X = X,
+  Y = Y,
+  W = W,
+  num.trees = CF_NUM_TREES,
+  sample.fraction = CF_SAMPLE_FRACTION,
+  sample.weights = NULL,
+  min.node.size = CF_MIN_NODE_SIZE,
+  honesty.fraction = CF_HONESTY_FRACTION,
+  clusters = NULL,
+  equalize.cluster.weights = FALSE,
+  mtry = min(ceiling(sqrt(ncol(X)) + 20), ncol(X)),
+  honesty = TRUE,
+  honesty.prune.leaves = TRUE,
+  alpha = 0.05,
+  imbalance.penalty = 0,
+  stabilize.splits = TRUE,
+  ci.group.size = 2,
+  tune.parameters = "none",
+  tune.num.trees = 200,
+  tune.num.reps = 50,
+  tune.num.draws = 1000,
+  compute.oob.predictions = TRUE,
+  num.threads = NULL,
+  seed = runif(1, 0, .Machine$integer.max)
+)
+
+# calibration
+grf::test_calibration(cf)
+
+# Step 4: Analyze Results
+# Get individualized treatment effect estimates
+tau_hat <- predict(cf)$predictions
+
+# Add predictions back to original data
+dat_subset <- dat[complete_cases, ]
+dat_subset$cate <- tau_hat
+
+# Average treatment effect 
+# Now represents the effect of adding one additional PBMA
+ate <- average_treatment_effect(cf)
+print(paste("Average Treatment Effect (per additional PBMA):", round(ate[1], 4)))
+print(paste("Standard Error:", round(ate[2], 4)))
+
+# Variable importance
+vi <- variable_importance(cf)
+var_importance <- data.frame(
+  variable = colnames(X),
+  importance = vi
+) |>
+  arrange(desc(importance))
+
+print("Top 10 variables for treatment effect heterogeneity:")
+head(var_importance, 10) 
+
+# Split into high and low effect groups
+dat_subset <- dat_subset |>
+  mutate(treatment_effect_group = ifelse(cate > median(cate), "High Effect", "Low Effect"))
+
+# Compare groups
+dat_subset |>
+  group_by(treatment_effect_group) |>
+  summarize(across(c(median_income, meat_select, age, per_gop,
+                     times_visited_chipotle_past_month), \(x) mean(x, na.rm = TRUE)),
+            n = n(),
+            .groups = "drop")
+
+# Visualization of age relationship
+dat_subset |>
+  filter(!is.na(age), !is.na(cate)) |>
+  ggplot(aes(x = age, y = cate)) +
+  geom_point(alpha = 0.3) +
+  geom_smooth(method = "lm", linetype = 'dotted', se = F) +
+  theme_minimal() +
+  labs(title = "Heterogeneous Treatment Effects by Age",
+       x = "Age (in decades)",
+       y = "Effect of Adding One PBMA on Meat Selection",
+       subtitle = "Negative values indicate decreased meat selection with more PBMAs",
+       caption = paste("N =", sum(!is.na(dat_subset$age) & !is.na(dat_subset$cate)), "observations"))
+
+# Split data into train and test sets
+n <- nrow(X)
+set.seed(42)  # For reproducibility
+train <- sample(1:n, n / 2)
+
+# Train forest on training data
+train.forest <- causal_forest(
+  X[train, ], 
+  Y[train], 
+  W[train],
+  num.trees = 4000,
+  min.node.size = 5,
+  honesty = TRUE,
+  tune.parameters = "none"
+)
+
+# Get predictions on test data
+test_predictions <- predict(train.forest, X[-train, ])$predictions
+
+# Evaluate predictions using best_linear_projection
+blp <- grf::best_linear_projection(
+  train.forest, 
+  X[train, ],
+  debiasing.weights = NULL
+)
+print(blp)
+
+# Compare predicted vs actual in test set
+test.forest <- causal_forest(
+  X[-train, ], 
+  Y[-train], 
+  W[-train],
+  num.trees = 4000,
+  min.node.size = 5,
+  honesty = TRUE,
+  tune.parameters = "none"
+)
+
+# Get test set predictions
+test_actual <- predict(test.forest)$predictions
+
+# Plot predicted vs actual
+plot(test_predictions, test_actual, 
+     xlab = "Predicted Treatment Effect (Training)",
+     ylab = "Estimated Treatment Effect (Test)",
+     main = "Predicted vs Estimated Treatment Effects")
+abline(0, 1, lty = 2)
+
+# Add a lowess line
+lines(lowess(test_predictions, test_actual), col = "red")
+
+# Calculate correlation
+cor_test <- cor.test(test_predictions, test_actual)
+print(paste("Correlation:", round(cor_test$estimate, 3),
+            "p-value:", round(cor_test$p.value, 4)))
+
+```
