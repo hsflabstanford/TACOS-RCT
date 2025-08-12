@@ -397,7 +397,7 @@ taco_choice_figure <- dat |>
     "Steak" = "darkred"
   )) +
   labs(
-    x = "Treatment Arm",
+    x = "",
     y = "Proportion",
     fill = "Taco Choice"
   ) + 
