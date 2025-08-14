@@ -526,7 +526,7 @@ dat |> mutate(ed_breakdown = if_else(education == '4-year college graduate' |
   h1_analysis(meat_select ~ ed_breakdown)
 
 # 10 servings of meat
-dat |> mutate(meat_breakdown = if_else(total_meat >= 10, TRUE, FALSE)) |> 
+dat |> mutate(meat_breakdown = if_else(total_meat > 10, TRUE, FALSE)) |> 
   h1_analysis(meat_select ~ meat_breakdown)
 # age 
 dat |> h1_analysis(meat_select ~ age)
