@@ -528,6 +528,10 @@ dat |> mutate(ed_breakdown = if_else(education == '4-year college graduate' |
 # 10 servings of meat
 dat |> mutate(meat_breakdown = if_else(total_meat > 10, TRUE, FALSE)) |> 
   h1_analysis(meat_select ~ meat_breakdown)
+# just FYI here is the same analysis but for above/below median, which is 7.5
+dat |> mutate(meat_breakdown = total_meat > median(total_meat, na.rm = T)) |> 
+  h1_analysis(meat_select ~ meat_breakdown)
+
 # age 
 dat |> h1_analysis(meat_select ~ age)
 
@@ -1387,155 +1391,114 @@ dat |>
 
 ```{r FFQ_stuff}
 
-# Check distribution of dietary categories
-diet_distribution <- dat |>
+# Collapse to 3 groups matching reviewer's framing
+dat <- dat |>
+  mutate(
+    diet_3group = case_when(
+      diet_category_ffq %in% c("Vegan", "Vegetarian", "Pescatarian") ~ "Vegetarian/Vegan/Pescatarian",
+      diet_category_ffq %in% c("Low meat", "Moderate meat") ~ "Flexitarian",
+      diet_category_ffq %in% c("Regular meat", "High meat") ~ "Frequent meat eater",
+      TRUE ~ NA_character_
+    ),
+    diet_3group = factor(diet_3group,
+                         levels = c("Frequent meat eater", "Flexitarian",
+                                    "Vegetarian/Vegan/Pescatarian"))
+  )
+
+# Distribution of dietary categories (all 7 levels)
+dat |>
   count(diet_category_ffq) |>
-  mutate(percentage = n / sum(n) * 100)
+  mutate(percentage = round(n / sum(n) * 100, 1)) |>
+  kable(caption = "Distribution of dietary categories")
 
-print(diet_distribution)
+# Distribution of 3-group categories
+dat |>
+  count(diet_3group) |>
+  mutate(percentage = round(n / sum(n) * 100, 1)) |>
+  kable(caption = "Distribution of 3 dietary groups")
 
-# 1. Examine baseline meat selection rates by dietary category
-baseline_rates <- dat |>
+# Baseline meat selection rates by dietary category
+dat |>
   group_by(diet_category_ffq) |>
   summarize(
     n = n(),
     meat_selection_rate = mean(meat_select, na.rm = TRUE),
-    se = sd(meat_select, na.rm = TRUE) / sqrt(n())
-  )
+    se = sd(meat_select, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  ) |>
+  kable(digits = 3, caption = "Baseline meat selection rates by dietary category")
 
-print("Baseline meat selection rates by dietary category:")
-print(baseline_rates)
-
-# 2. Compare treatment effects across dietary categories
-# Add the predicted treatment effects back to the data
-complete_cases <- complete.cases(dat)  # Define complete_cases
-dat_subset <- dat[complete_cases, ]
-
-# First, run the model to get the overall treatment effect
-treatment_model <- h1_analysis(dat, meat_select ~ PMA_count)
-overall_effect <- treatment_model$estimate[treatment_model$term == "PMA_count"]
-
-# Then run a separate model for each dietary category
-treatment_effects <- dat |>
-  group_by(diet_category_ffq) |>
+# Treatment effects stratified by 3-group dietary category (primary table)
+treatment_effects_3group <- dat |>
+  group_by(diet_3group) |>
   group_modify(~{
-    # Run model within each diet category
     model <- h1_analysis(.x, meat_select ~ PMA_count)
-    effect <- model$estimate[model$term == "PMA_count"]
-    
-    # Return a one-row data frame with results
     data.frame(
       n = nrow(.x),
-      effect = effect, 
-      se = model$std.error[model$term == "PMA_count"]
+      effect = model$estimate[model$term == "PMA_count"],
+      se = model$std.error[model$term == "PMA_count"],
+      p_value = model$p.value[model$term == "PMA_count"],
+      ci_low = model$conf.low[model$term == "PMA_count"],
+      ci_high = model$conf.high[model$term == "PMA_count"]
     )
   })
-print("Average treatment effects by dietary category:")
-print(treatment_effects)
+treatment_effects_3group |> kable(digits = 3,
+  caption = "Treatment effects by dietary group (3-group)")
 
-# 3. Create a visualization of treatment effects by dietary category
-ggplot(treatment_effects, aes(x = diet_category_ffq, y = effect)) +
-  geom_col(fill = "steelblue") +
-  geom_errorbar(aes(ymin = effect - 1.96*se, 
-                    ymax = effect + 1.96*se), 
-                width = 0.2) +
-  theme_minimal() +
-  labs(title = "Treatment Effects by Dietary Category",
-       x = "Dietary Category",
-       y = "Effect of Adding One PBMA",
-       subtitle = "Negative values indicate decreased meat selection with more PBMAs") +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+# Full 7-category stratified results
+treatment_effects_7 <- dat |>
+  group_by(diet_category_ffq) |>
+  group_modify(~{
+    model <- h1_analysis(.x, meat_select ~ PMA_count)
+    data.frame(
+      n = nrow(.x),
+      effect = model$estimate[model$term == "PMA_count"],
+      se = model$std.error[model$term == "PMA_count"],
+      p_value = model$p.value[model$term == "PMA_count"],
+      ci_low = model$conf.low[model$term == "PMA_count"],
+      ci_high = model$conf.high[model$term == "PMA_count"]
+    )
+  })
+treatment_effects_7 |> kable(digits = 3,
+  caption = "Treatment effects by dietary category (7-level)")
 
-# 4. Interaction between treatment and diet category using a regression model
-# Run interaction model
-interaction_model <- h1_analysis(dat, meat_select ~ PMA_count * diet_category_ffq)
+# Interaction model with "Regular meat" as reference (largest meat-eating group)
+ref_dat <- dat |>
+  mutate(diet_category_ffq = fct_relevel(diet_category_ffq, "Regular meat"))
+interaction_model <- h1_analysis(ref_dat, meat_select ~ PMA_count * diet_category_ffq)
 
-# Extract the results by category
+ref_effect <- interaction_model$estimate[interaction_model$term == "PMA_count"]
 interaction_model |>
   filter(grepl("PMA_count", term)) |>
   mutate(
-    diet_category_ffq = case_when(
-      term == "PMA_count" ~ "Vegan",  # This is the reference category, not "Overall"
+    category = case_when(
+      term == "PMA_count" ~ "Regular meat",
       TRUE ~ gsub("PMA_count:diet_category_ffq", "", term)
     ),
-    # For non-reference categories, compute the total effect
     total_effect = case_when(
-      diet_category_ffq == "Vegan" ~ estimate,
-      TRUE ~ estimate + interaction_model$estimate[interaction_model$term == "PMA_count"]
-    ))
+      category == "Regular meat" ~ estimate,
+      TRUE ~ estimate + ref_effect
+    )
+  ) |>
+  select(category, total_effect, std.error, p.value, conf.low, conf.high) |>
+  kable(digits = 3, caption = "Total treatment effect by dietary category (interaction model, ref = Regular meat)")
 
-
-# Check the distribution of total meat servings
-summary(dat$total_meat)
-hist(dat$total_meat, breaks = 20, 
-     main = "Distribution of Weekly Meat Servings", 
-     xlab = "Total Weekly Meat Servings")
-
-# Use linear model to predict meat selection based on meat consumption and treatment
+# Use linear model to predict meat selection based on total meat consumption and treatment
 dat |> h1_analysis(meat_select ~ total_meat * PMA_count)
 
-# another way to visualize this
-dat |>
-  select(ffq_cow_freq, ffq_pig_freq, ffq_hen_freq, ffq_fish_freq, ffq_dairy_freq, ffq_eggs_freq) |>
-  pivot_longer(
-    cols = everything(),
-    names_to = "food_type",
-    values_to = "frequency"
-  ) |>
-  mutate(
-    food_type = case_when(
-      food_type == "ffq_cow_freq" ~ "Beef",
-      food_type == "ffq_pig_freq" ~ "Pork",
-      food_type == "ffq_hen_freq" ~ "Chicken", 
-      food_type == "ffq_fish_freq" ~ "Fish",
-      food_type == "ffq_dairy_freq" ~ "Dairy",
-      food_type == "ffq_eggs_freq" ~ "Eggs"
-    ),
-    # Order food types in a logical grouping
-    food_type = factor(food_type, levels = c("Chicken", "Beef", "Pork", "Fish", "Eggs", "Dairy")),
-    # Order frequencies with lowest at bottom
-    frequency = factor(frequency, levels = rev(c(
-      "Never", 
-      "1 time in the past week",
-      "2 times in the past week",
-      "3-4 times in the past week",
-      "5-6 times in the past week",
-      "1 time per day",
-      "2 or more times per day"
-    )))) |>
-  filter(!is.na(frequency)) |>
-  ggplot(aes(x = food_type, fill = frequency)) +
-  geom_bar(position = "fill") +
-  scale_y_continuous(labels = scales::percent) +
-  scale_fill_manual(values = c(
-    "Never" = "#FF8A80",  # Pink/red
-    "1 time in the past week" = "#A5D6A7",  # Light green
-    "2 times in the past week" = "#90CAF9",  # Light blue
-    "3-4 times in the past week" = "#CE93D8",  # Light purple
-    "5-6 times in the past week" = "#4CAF50",  # Green
-    "1 time per day" = "#FDD835",  # Yellow
-    "2 or more times per day" = "#FF5722"  # Orange
-  )) +
-  labs(
-    title = "Food Consumption Frequency Distribution",
-    x = "Food Type",
-    y = "Proportion",
-    fill = "Consumption Frequency"
-  ) +
-  theme_minimal()
-
-# also, who orders strictly vegan stuff?
+# Alignment between dietary self-report and choice behavior:
+# Among participants classified as Vegan by FFQ (never eat any animal products),
+# only ~35% ordered a strictly vegan taco in the hypothetical task -- highlighting
+# that dietary identity and food choice behavior are imperfectly correlated.
 dat |>
   group_by(diet_category_ffq) |>
   summarise(
     total = n(),
-    veg_tacos = sum(meat_select == 0, na.rm = TRUE),
-    vegan_tacos = sum(is_vegan == 1, na.rm = TRUE),
-    prop_veg = mean(meat_select == 0, na.rm = TRUE),
-    prop_vegan = mean(is_vegan == 1, na.rm = TRUE)
-  )
-# interesting that 35% of people who say they "never" eat meat, fish,
-# dairy or eggs order vegan tacos as well, I'd probably highlight this
+    prop_plant_based = mean(meat_select == 0, na.rm = TRUE),
+    prop_vegan_order = mean(is_vegan == 1, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  kable(digits = 3, caption = "Plant-based and vegan ordering rates by dietary category")
 ```
 
 ### Generalized Random Forest check
